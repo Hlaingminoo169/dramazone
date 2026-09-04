@@ -1,0 +1,76 @@
+# ============================================================
+# DramaZone VIP Bot — .gitignore
+# ============================================================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+*.pyo
+*.pyd
+
+# --- Virtual Environments ---
+.venv/
+venv/
+env/
+ENV/
+.env.bak
+
+# --- Environment Variables (NEVER commit) ---
+.env
+.env.local
+.env.production
+.env.staging
+*.env
+
+# --- IDE & Editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log
+logs/
+*.log.*
+
+# --- Test & Coverage ---
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- mypy ---
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# --- Temporary Files ---
+*.tmp
+*.bak
+*.orig
+tmp/
+temp/
+
+# --- Docker ---
+*.dockerignore
+
+# --- Downloaded Telegram Files ---
+downloads/
+screenshots/
