@@ -53,6 +53,7 @@ class Settings(BaseSettings):
         ]
 
     admin_username: str = "myatnyein21"
+    admin_username_2: str = "hlaing_min_16"
 
     # ── Payment ───────────────────────────────────────────────────────────────
     kpay_phone: str = ""

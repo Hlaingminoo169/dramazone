@@ -101,19 +101,22 @@ async def show_order_history(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show the admin contact link."""
+    """Show both admin contact links."""
     settings = get_settings()
     admin_username = settings.admin_username
+    admin_username_2 = settings.admin_username_2
 
     text = (
         f"📞 <b>Admin ကို ဆက်သွယ်မည်</b>\n\n"
-        f"မေးခွန်းများ သို့မဟုတ် အကူအညီလိုအပ်ပါက:\n\n"
-        f"👉 @{admin_username} သို့ တိုက်ရိုက်ဆက်သွယ်နိုင်ပါသည်။"
+        f"မေးခွန်းများ သို့မဟုတ် အကူအညီလိုအပ်ပါက\n"
+        f"အောက်ပါ Admin များထံ တိုက်ရိုက်ဆက်သွယ်နိုင်ပါသည်။"
     )
 
     keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💬 @{admin_username} နှင့် ဆက်သွယ်မည်",
+        [InlineKeyboardButton(f"💬 @{admin_username}",
                               url=f"https://t.me/{admin_username}")],
+        [InlineKeyboardButton(f"💬 @{admin_username_2}",
+                              url=f"https://t.me/{admin_username_2}")],
         [InlineKeyboardButton("🏠 မူလစာမျက်နှာ", callback_data="menu:home")],
     ])
 
