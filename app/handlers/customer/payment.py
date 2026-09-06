@@ -71,8 +71,8 @@ async def _send_payment_instructions(
         f"📱 *{method_label} ဖြင့် ငွေလွှဲပေးပို့ပါ*\n\n"
         f"Phone: `{phone}`\n"
         f"Account Name: *{name}*\n\n"
-        f"ငွေလွှဲပြီးနောက် Screenshot ပေးပို့ပေးပါ။\n\n"
-        f"⚠️ ကျေးဇူးပြု၍ ငွေလွှဲပြီးသော Screenshot ကို ပေးပို့ပါ။"
+        f"⚠️ *အရေးကြီး:* ငွေလွှဲသည့်အခါ Note/Remark တွင် မိမိ၏ *Telegram Name* (သို့မဟုတ်) Username ကို ထည့်သွင်းပေးပါရန်။\n\n"
+        f"ငွေလွှဲပြီးပါက ငွေလွှဲပြေစာ Screenshot ကို ပေးပို့ပေးပါ။"
     )
 
     if qr_file_id:
