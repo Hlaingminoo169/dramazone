@@ -9,7 +9,7 @@ description = "DramaZone VIP Telegram Bot System"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115.0",
+    "fastapi[standard]>=0.115.0",
     "uvicorn[standard]>=0.30.0",
     "python-telegram-bot>=21.0",
     "pymongo[srv]>=4.8.0",
