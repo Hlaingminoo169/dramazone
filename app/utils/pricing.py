@@ -9,14 +9,8 @@ duplicated or hard-coded elsewhere.
 
 Current packages:
     1 ကား  →  1,500 MMK
-    2 ကား  →  3,000 MMK
-    3 ကား  →  4,500 MMK
-    4 ကား  →  6,000 MMK
-    5 ကား  →  5,000 MMK  (discounted bundle)
-
-The 5-movie package is cheaper than 4×1,500 = 6,000 (discount applies).
-
-Quantities NOT in the table are not offered by default.
+    3 ကား  →  3,500 MMK
+    5 ကား  →  5,000 MMK
 """
 from __future__ import annotations
 
@@ -27,10 +21,8 @@ from typing import Dict, Optional, List, Tuple
 # Value : price in MMK (integer)
 PACKAGES: Dict[int, int] = {
     1: 1_500,
-    2: 3_000,
-    3: 4_500,
-    4: 6_000,
-    5: 5_000,  # discounted bundle
+    3: 3_500,
+    5: 5_000,
 }
 
 
