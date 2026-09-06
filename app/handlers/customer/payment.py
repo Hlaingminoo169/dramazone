@@ -207,9 +207,9 @@ async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         from app.bots.customer_bot import get_customer_app
         from app.bots.admin_bot import get_admin_app
         from app.services.notification_service import notify_admins_new_payment
-        from app.services.user_service import get_user
+        from app.services.user_service import upsert_user
 
-        user = get_user(tg_user.id) or {"firstName": tg_user.first_name, "username": tg_user.username}
+        user = upsert_user(tg_user)
 
         await notify_admins_new_payment(
             order=updated_order,

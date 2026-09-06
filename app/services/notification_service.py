@@ -44,31 +44,64 @@ def _build_approve_reject_keyboard(order_id: str) -> InlineKeyboardMarkup:
     ])
 
 
-def _format_order_notification(order: dict, user: dict) -> str:
-    """Format the admin notification message for a new payment."""
+def format_admin_order_notification(
+    order: dict,
+    user: dict,
+    status: str = "WAITING_APPROVAL",
+    admin_display: str | None = None,
+    rejection_reason: str | None = None,
+) -> str:
+    """
+    Format the admin notification message for an order status.
+
+    Includes customer profile link, telegram username, and (when processed)
+    which admin approved/rejected the payment.
+    """
     movies_text = "\n".join(
         f"  {i + 1}. {m['title']}"
         for i, m in enumerate(order.get("selectedMovies", []))
     )
-    username_display = (
-        f"@{user.get('username')}" if user.get("username") else "(username မရှိပါ)"
-    )
-    first_name = user.get("firstName", "")
-    last_name = user.get("lastName", "")
+    username = user.get("username") if user else None
+    username_display = f"@{username}" if username else "(username မရှိပါ)"
+    first_name = user.get("firstName", "") if user else ""
+    last_name = user.get("lastName", "") if user else ""
     full_name = f"{first_name} {last_name}".strip() or "(နာမည်မရှိပါ)"
+    clean_name = full_name.replace("[", "(").replace("]", ")")
+    tg_id = order.get("telegramUserId")
 
-    return (
-        f"🔔 *New Payment Received*\n\n"
-        f"Order ID: `{order['orderCode']}`\n"
-        f"Customer: {full_name}\n"
-        f"Username: {username_display}\n"
-        f"Telegram ID: `{order['telegramUserId']}`\n\n"
-        f"Movies:\n{movies_text}\n\n"
-        f"Quantity: {order['quantity']}\n"
-        f"Amount: *{format_price(order['amount'])}*\n"
-        f"Payment Method: {order['paymentMethod']}\n\n"
-        f"Status: WAITING\\_APPROVAL"
-    )
+    if status == "APPROVED":
+        header = "✅ *Payment Approved*"
+        status_str = "✅ `APPROVED`"
+    elif status == "REJECTED":
+        header = "❌ *Payment Rejected*"
+        status_str = "❌ `REJECTED`"
+    else:
+        header = "🔔 *New Payment Received*"
+        status_str = "⏳ `WAITING_APPROVAL`"
+
+    lines = [
+        f"{header}\n",
+        f"Order ID: `{order['orderCode']}`",
+        f"Customer: [{clean_name}](tg://user?id={tg_id})",
+        f"Username: {username_display}",
+        f"Telegram ID: `{tg_id}`\n",
+        f"Movies:\n{movies_text}\n",
+        f"Quantity: {order['quantity']}",
+        f"Amount: *{format_price(order['amount'])}*",
+        f"Payment Method: {order['paymentMethod']}\n",
+        f"Status: {status_str}",
+    ]
+
+    if admin_display:
+        if status == "APPROVED":
+            lines.append(f"Approved by: {admin_display}")
+        elif status == "REJECTED":
+            lines.append(f"Rejected by: {admin_display}")
+
+    if rejection_reason and status == "REJECTED":
+        lines.append(f"Reason: {rejection_reason}")
+
+    return "\n".join(lines)
 
 
 async def notify_admins_new_payment(
@@ -85,7 +118,7 @@ async def notify_admins_new_payment(
     via the Admin Bot to avoid cross-bot file ID restrictions.
     """
     order_id = str(order["_id"])
-    caption = _format_order_notification(order, user)
+    caption = format_admin_order_notification(order, user, status="WAITING_APPROVAL")
     keyboard = _build_approve_reject_keyboard(order_id)
 
     # ── Download screenshot from Telegram via Customer Bot ────────────────────

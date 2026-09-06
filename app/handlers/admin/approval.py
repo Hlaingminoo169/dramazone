@@ -16,6 +16,7 @@ from app.config import settings
 from app.services.notification_service import (
     CB_APPROVE,
     CB_REJECT,
+    format_admin_order_notification,
     notify_customer_approved,
     notify_customer_rejected,
 )
@@ -26,6 +27,7 @@ from app.services.session_service import (
     clear_session,
     get_session_state,
 )
+from app.services.user_service import get_user
 from app.types import BotType, SessionState
 
 logger = logging.getLogger(__name__)
@@ -40,10 +42,12 @@ async def handle_approve_callback(update: Update, context: ContextTypes.DEFAULT_
     Admin clicks ✅ Approve.
 
     Atomic: only succeeds if order is still WAITING_APPROVAL.
+    Updates original notification caption with status and approving admin info.
     """
     query = update.callback_query
     await query.answer()
-    admin_id = update.effective_user.id
+    admin_user = update.effective_user
+    admin_id = admin_user.id
 
     if not _is_admin(admin_id):
         await query.answer("🚫 Admin only.", show_alert=True)
@@ -51,7 +55,6 @@ async def handle_approve_callback(update: Update, context: ContextTypes.DEFAULT_
 
     order_id = query.data.split(":")[1] if ":" in query.data else None
     if not order_id:
-        await query.edit_message_caption(caption="❌ Invalid order ID.")
         return
 
     # Atomic approval.
@@ -68,18 +71,38 @@ async def handle_approve_callback(update: Update, context: ContextTypes.DEFAULT_
             await query.answer("⚠️ Order မတွေ့ပါ။", show_alert=True)
         return
 
-    # Edit the admin notification message to reflect approval.
+    # Format admin display name/username
+    admin_name = f"{admin_user.first_name or ''} {admin_user.last_name or ''}".strip() or "Admin"
+    clean_admin_name = admin_name.replace("[", "(").replace("]", ")")
+    if admin_user.username:
+        admin_display = f"@{admin_user.username}"
+    else:
+        admin_display = f"[{clean_admin_name}](tg://user?id={admin_id})"
+
+    customer_user = get_user(updated["telegramUserId"]) or {}
+    updated_caption = format_admin_order_notification(
+        order=updated,
+        user=customer_user,
+        status="APPROVED",
+        admin_display=admin_display,
+    )
+
+    # Edit the admin notification message to reflect approval details and admin info.
     try:
-        await query.edit_message_caption(
-            caption=(
-                f"✅ *Approved*\n\n"
-                f"Order: `{updated['orderCode']}`\n"
-                f"Approved by: Admin `{admin_id}`"
-            ),
-            parse_mode="Markdown",
-        )
-    except Exception:
-        pass  # Message may not have a caption if it was text-only.
+        if query.message.photo:
+            await query.edit_message_caption(
+                caption=updated_caption,
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+        else:
+            await query.edit_message_text(
+                text=updated_caption,
+                parse_mode="Markdown",
+                reply_markup=None,
+            )
+    except Exception as exc:
+        logger.error("Failed to edit admin notification caption on approve: %s", exc)
 
     # Notify customer.
     try:
@@ -97,7 +120,7 @@ async def handle_reject_callback(update: Update, context: ContextTypes.DEFAULT_T
     """
     Admin clicks ❌ Reject.
 
-    Stores order_id in admin session and asks for rejection reason.
+    Stores order_id & message info in admin session and asks for rejection reason.
     """
     query = update.callback_query
     await query.answer()
@@ -123,12 +146,17 @@ async def handle_reject_callback(update: Update, context: ContextTypes.DEFAULT_T
         )
         return
 
-    # Store order_id in admin session, await reason text.
+    # Store order_id & message info in admin session, await reason text.
     set_session(
         admin_id,
         BotType.ADMIN,
         SessionState.WAITING_FOR_REJECTION_REASON,
-        data={"orderId": order_id},
+        data={
+            "orderId": order_id,
+            "messageId": query.message.message_id,
+            "chatId": query.message.chat_id,
+            "hasPhoto": bool(query.message.photo),
+        },
     )
 
     await query.message.reply_text(
@@ -144,7 +172,8 @@ async def handle_rejection_reason(update: Update, context: ContextTypes.DEFAULT_
 
     Triggered when admin is in WAITING_FOR_REJECTION_REASON state.
     """
-    admin_id = update.effective_user.id
+    admin_user = update.effective_user
+    admin_id = admin_user.id
 
     if not _is_admin(admin_id):
         return
@@ -153,7 +182,11 @@ async def handle_rejection_reason(update: Update, context: ContextTypes.DEFAULT_
         return
 
     session = get_session(admin_id, BotType.ADMIN)
-    order_id = session.get("data", {}).get("orderId")
+    session_data = session.get("data", {})
+    order_id = session_data.get("orderId")
+    orig_msg_id = session_data.get("messageId")
+    orig_chat_id = session_data.get("chatId")
+    has_photo = session_data.get("hasPhoto", True)
     reason = update.message.text.strip()
 
     if not reason:
@@ -179,6 +212,44 @@ async def handle_rejection_reason(update: Update, context: ContextTypes.DEFAULT_
         return
 
     clear_session(admin_id, BotType.ADMIN)
+
+    # Format admin display info
+    admin_name = f"{admin_user.first_name or ''} {admin_user.last_name or ''}".strip() or "Admin"
+    clean_admin_name = admin_name.replace("[", "(").replace("]", ")")
+    if admin_user.username:
+        admin_display = f"@{admin_user.username}"
+    else:
+        admin_display = f"[{clean_admin_name}](tg://user?id={admin_id})"
+
+    customer_user = get_user(updated["telegramUserId"]) or {}
+    updated_caption = format_admin_order_notification(
+        order=updated,
+        user=customer_user,
+        status="REJECTED",
+        admin_display=admin_display,
+        rejection_reason=reason,
+    )
+
+    if orig_chat_id and orig_msg_id:
+        try:
+            if has_photo:
+                await context.bot.edit_message_caption(
+                    chat_id=orig_chat_id,
+                    message_id=orig_msg_id,
+                    caption=updated_caption,
+                    parse_mode="Markdown",
+                    reply_markup=None,
+                )
+            else:
+                await context.bot.edit_message_text(
+                    chat_id=orig_chat_id,
+                    message_id=orig_msg_id,
+                    text=updated_caption,
+                    parse_mode="Markdown",
+                    reply_markup=None,
+                )
+        except Exception as exc:
+            logger.error("Failed to edit original admin message on reject: %s", exc)
 
     await update.message.reply_text(
         f"✅ Order `{updated['orderCode']}` ကို ငြင်းပယ်ပြီးပါပြီ။",
