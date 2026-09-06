@@ -1,75 +1,61 @@
 """
 app/handlers/customer/start.py
-================================
-Handles /start command and main menu for the Customer Bot.
-"""
 
+Customer Bot /start handler — Step 6.
+
+Saves/updates user profile in MongoDB.
+Shows the main menu.
+"""
 from __future__ import annotations
 
 import logging
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.ext import CommandHandler, ContextTypes, Application
 
-from app.database.mongodb import get_db
-from app.services.session_service import clear_session
 from app.services.user_service import upsert_user
+from app.services.session_service import clear_session
 from app.types import BotType
 
 logger = logging.getLogger(__name__)
 
-MAIN_MENU_TEXT = (
-    "👋 <b>DramaZone VIP</b> မှ ကြိုဆိုပါသည်!\n\n"
-    "🎬 လိုင်စင်ရ မြန်မာဘာသာပြန် ကားများကို VIP Channel မှတဆင့် ကြည့်ရှုနိုင်ပါသည်။\n\n"
-    "အောက်ပါ ရွေးချယ်မှုတစ်ခုကို ရွေးချယ်ပါ:"
+# ── Menu button labels ────────────────────────────────────────────────────────
+BTN_BUY = "🎬 VIP ကားဝယ်မည်"
+BTN_ORDERS = "📦 ကျွန်ုပ်၏ Order များ"
+BTN_CONTACT = "📞 Admin ကို ဆက်သွယ်မည်"
+
+MAIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton(BTN_BUY)], [KeyboardButton(BTN_ORDERS)], [KeyboardButton(BTN_CONTACT)]],
+    resize_keyboard=True,
+    one_time_keyboard=False,
 )
 
-MAIN_MENU_KEYBOARD = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🎬 VIP ကားဝယ်မည်", callback_data="menu:buy")],
-    [InlineKeyboardButton("📦 ကျွန်ုပ်၏ Order များ", callback_data="menu:orders")],
-    [InlineKeyboardButton("📞 Admin ကို ဆက်သွယ်မည်", callback_data="menu:contact")],
-])
+WELCOME_TEXT = (
+    "🎬 *DramaZone VIP မှ ကြိုဆိုပါတယ်*\n\n"
+    "VIP Content ဝယ်ယူရန် အောက်ပါ Menu ကို အသုံးပြုနိုင်ပါတယ်။"
+)
 
 
-async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command — show main menu, upsert user, clear session."""
-    user = update.effective_user
-    if not user:
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start — upsert user, clear stale session, show main menu."""
+    tg_user = update.effective_user
+    if tg_user is None:
         return
 
-    db = get_db()
+    # Save / update user profile.
+    upsert_user(tg_user)
 
-    # Upsert user record
-    upsert_user(db, user)
-
-    # Reset any in-progress session
-    clear_session(db, user.id, BotType.CUSTOMER)
+    # Clear any existing session so the user starts fresh.
+    clear_session(tg_user.id, BotType.CUSTOMER)
 
     await update.message.reply_text(
-        MAIN_MENU_TEXT,
-        parse_mode="HTML",
+        WELCOME_TEXT,
+        parse_mode="Markdown",
         reply_markup=MAIN_MENU_KEYBOARD,
     )
+    logger.info("User %s started customer bot.", tg_user.id)
 
 
-async def main_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle main menu button presses."""
-    query = update.callback_query
-    await query.answer()
-
-    data = query.data  # e.g. "menu:buy"
-
-    if data == "menu:buy":
-        from app.handlers.customer.package import show_packages
-        await show_packages(update, context)
-
-    elif data == "menu:orders":
-        from app.handlers.customer.orders import show_order_history
-        await show_order_history(update, context)
-
-    elif data == "menu:contact":
-        from app.handlers.customer.orders import contact_admin
-        await contact_admin(update, context)
-
-    else:
-        await query.edit_message_text("❓ အမှားတစ်ခု ဖြစ်ပွားသည်။ /start နှိပ်ပါ။")
+def register(app: Application) -> None:
+    """Register start handler on the Application."""
+    app.add_handler(CommandHandler("start", start))

@@ -1,174 +1,172 @@
 """
 main.py
-========
-FastAPI application entrypoint.
-Registers two webhook endpoints — one per bot.
-Validates Telegram webhook secret tokens.
-"""
 
+DramaZone VIP Bot — FastAPI application entry point.
+
+Steps implemented:
+  1  — MongoDB connection + indexes
+  2  — Project structure
+  3  — GET / and GET /health
+  4  — POST /webhook/customer and /webhook/admin (with secret validation)
+  5  — Database schema (via indexes + services)
+  6  — Customer /start
+  7  — Package selection
+  8  — Myanmar number input
+  9  — Movie selection
+  10 — Payment method
+  11 — Order creation + screenshot
+  12 — Admin bot
+  13 — Admin payment notification
+  14 — Approve order
+  15 — Reject order + reason
+  16 — Order history
+  17 — Contact admin
+  18 — Security (webhook secrets, admin auth, atomic ops)
+"""
 from __future__ import annotations
 
-import hashlib
-import hmac
 import logging
 import os
-
+import sys
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, HTTPException, Request, Header
-from fastapi.responses import JSONResponse
 
-from app.config import get_settings
-from app.database.indexes import create_indexes
-from app.database.mongodb import get_db, ping_db, close_client
-from app.database.seed import run_seed
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request, status
+from telegram import Update
 
-# Configure logging early
+from app.config import settings
+from app.database.mongodb import connect as db_connect, close as db_close
+from app.database.indexes import ensure_indexes
+
+# ── Logging ──────────────────────────────────────────────────────────────────
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO"),
+    level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    stream=sys.stdout,
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("dramazone")
 
 
+# ── Application lifespan ─────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup and shutdown lifecycle."""
-    logger.info("Starting DramaZone VIP Bot System...")
+    logger.info("DramaZone VIP starting up…")
 
-    # 1. Validate config (raises on missing required vars)
-    settings = get_settings()
-    logger.info("Configuration loaded. Admin IDs: %s", settings.admin_telegram_ids)
+    # MongoDB
+    try:
+        db_connect()
+        ensure_indexes()
+    except RuntimeError as exc:
+        logger.critical("Startup failed: %s", exc)
+        raise
 
-    # 2. Verify MongoDB connection
-    if not ping_db():
-        logger.critical("Cannot connect to MongoDB! Aborting startup.")
-        raise RuntimeError("MongoDB connection failed.")
+    # Seed initial movie data (idempotent)
+    from app.services.movie_service import seed_movies
+    seed_movies()
 
-    # 3. Create indexes
-    db = get_db()
-    create_indexes(db)
+    # Initialise bot Applications (validates tokens eagerly)
+    if settings.customer_bot_token:
+        from app.bots.customer_bot import get_customer_app
+        customer_app = get_customer_app()
+        await customer_app.initialize()
 
-    # 4. Seed initial data
-    run_seed(db)
+    if settings.admin_bot_token:
+        from app.bots.admin_bot import get_admin_app
+        admin_app = get_admin_app()
+        await admin_app.initialize()
 
-    # 5. Initialize bot applications (validates tokens)
-    from app.bots.customer_bot import build_customer_app
-    from app.bots.admin_bot import build_admin_app
+    logger.info("DramaZone VIP is ready.")
 
-    customer_app = build_customer_app()
-    admin_app = build_admin_app()
-
-    await customer_app.initialize()
-    await admin_app.initialize()
-
-    logger.info("✅ Both bots initialized successfully.")
-
-    # 6. Register webhooks if BASE_WEBHOOK_URL is configured
-    if settings.base_webhook_url:
-        customer_webhook_url = f"{settings.base_webhook_url}/webhook/customer"
-        admin_webhook_url = f"{settings.base_webhook_url}/webhook/admin"
-
-        await customer_app.bot.set_webhook(
-            url=customer_webhook_url,
-            secret_token=settings.customer_webhook_secret or None,
-            allowed_updates=["message", "callback_query"],
-        )
-        logger.info("Customer Bot webhook set: %s", customer_webhook_url)
-
-        await admin_app.bot.set_webhook(
-            url=admin_webhook_url,
-            secret_token=settings.admin_webhook_secret or None,
-            allowed_updates=["message", "callback_query"],
-        )
-        logger.info("Admin Bot webhook set: %s", admin_webhook_url)
-    else:
-        logger.warning("BASE_WEBHOOK_URL not set — skipping webhook registration.")
-
-    yield
+    yield  # ← application running
 
     # Shutdown
-    logger.info("Shutting down...")
-    await customer_app.shutdown()
-    await admin_app.shutdown()
-    close_client()
-    logger.info("Shutdown complete.")
+    logger.info("DramaZone VIP shutting down…")
+    db_close()
+    logger.info("Goodbye.")
 
 
+# ── FastAPI app ───────────────────────────────────────────────────────────────
 app = FastAPI(
-    title="DramaZone VIP Bot System",
-    version="1.0.0",
-    lifespan=lifespan,
-    docs_url=None,   # Disable Swagger UI in production
+    title="DramaZone VIP Bot API",
+    description="Telegram VIP content purchasing system",
+    version="0.1.0",
+    docs_url="/docs" if os.getenv("DOCS_ENABLED", "false").lower() == "true" else None,
     redoc_url=None,
+    lifespan=lifespan,
 )
 
 
-def _verify_secret(request_secret: str | None, configured_secret: str) -> bool:
-    """Constant-time comparison of webhook secret tokens."""
-    if not configured_secret:
-        return True  # Secret not configured — skip validation
-    if not request_secret:
-        return False
-    return hmac.compare_digest(request_secret, configured_secret)
+# ── Webhook secret validation ─────────────────────────────────────────────────
+def _validate_webhook_secret(request: Request, expected_secret: str) -> None:
+    """
+    Validate X-Telegram-Bot-Api-Secret-Token header.
+    Raises HTTP 403 on mismatch — never reveals the expected secret.
+    """
+    if not expected_secret:
+        return  # Secret not configured — dev mode only
+
+    received = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+    if received != expected_secret:
+        logger.warning(
+            "Webhook secret mismatch on %s from %s",
+            request.url.path,
+            request.client.host if request.client else "unknown",
+        )
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Forbidden")
 
 
-@app.get("/")
-async def health_check():
-    """Health check endpoint for hosting providers."""
-    return {"status": "ok", "service": "DramaZone VIP Bot System"}
+# ── Routes ────────────────────────────────────────────────────────────────────
+@app.get("/", include_in_schema=False)
+async def root():
+    return {"service": "DramaZone VIP Bot API", "version": "0.1.0"}
 
 
 @app.get("/health")
 async def health():
-    """Detailed health check."""
-    db_ok = ping_db()
-    return {
-        "status": "ok" if db_ok else "degraded",
-        "mongodb": "connected" if db_ok else "disconnected",
-    }
+    """Lightweight health check — suitable for hosting platform probes."""
+    return {"status": "ok"}
 
 
-@app.post("/webhook/customer")
-async def customer_webhook(
-    request: Request,
-    x_telegram_bot_api_secret_token: str | None = Header(default=None),
-):
-    """Receive updates for the Customer Bot."""
-    settings = get_settings()
-
-    if not _verify_secret(x_telegram_bot_api_secret_token, settings.customer_webhook_secret):
-        logger.warning("Invalid secret token on /webhook/customer")
-        raise HTTPException(status_code=403, detail="Forbidden")
+@app.post("/webhook/customer", include_in_schema=False)
+async def customer_webhook(request: Request):
+    """Receive and process Customer Bot Telegram updates."""
+    _validate_webhook_secret(request, settings.customer_webhook_secret)
 
     try:
+        from app.bots.customer_bot import get_customer_app
         data = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+        update = Update.de_json(data, get_customer_app().bot)
+        await get_customer_app().process_update(update)
+    except Exception as exc:
+        # Always return 200 — Telegram retries on non-200.
+        logger.exception("Error processing customer update: %s", type(exc).__name__)
 
-    from app.bots.customer_bot import process_customer_update
-    await process_customer_update(data)
-
-    return JSONResponse({"ok": True})
+    return {"ok": True}
 
 
-@app.post("/webhook/admin")
-async def admin_webhook(
-    request: Request,
-    x_telegram_bot_api_secret_token: str | None = Header(default=None),
-):
-    """Receive updates for the Admin Bot."""
-    settings = get_settings()
-
-    if not _verify_secret(x_telegram_bot_api_secret_token, settings.admin_webhook_secret):
-        logger.warning("Invalid secret token on /webhook/admin")
-        raise HTTPException(status_code=403, detail="Forbidden")
+@app.post("/webhook/admin", include_in_schema=False)
+async def admin_webhook(request: Request):
+    """Receive and process Admin Bot Telegram updates."""
+    _validate_webhook_secret(request, settings.admin_webhook_secret)
 
     try:
+        from app.bots.admin_bot import get_admin_app
         data = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid JSON")
+        update = Update.de_json(data, get_admin_app().bot)
+        await get_admin_app().process_update(update)
+    except Exception as exc:
+        logger.exception("Error processing admin update: %s", type(exc).__name__)
 
-    from app.bots.admin_bot import process_admin_update
-    await process_admin_update(data)
+    return {"ok": True}
 
-    return JSONResponse({"ok": True})
+
+# ── Dev entrypoint ────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", settings.port))
+    uvicorn.run(
+        "main:app",
+        host="0.0.0.0",
+        port=port,
+        reload=False,
+        log_level="info",
+    )

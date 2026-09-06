@@ -1,29 +1,26 @@
 """
 app/utils/validation.py
-=======================
+
 Input validation helpers shared across handlers.
 """
-
 from __future__ import annotations
 
-from bson import ObjectId
+from typing import Optional
+
+from app.utils.numbers import parse_myanmar_int
+from app.utils.pricing import is_valid_package
 
 
-def is_valid_object_id(value: str) -> bool:
-    """Return True if value is a valid MongoDB ObjectId hex string."""
-    try:
-        ObjectId(value)
-        return True
-    except Exception:
-        return False
-
-
-def sanitize_callback_data(data: str | None) -> str | None:
+def validate_package_input(text: str) -> Optional[int]:
     """
-    Strip and return callback data, or None if empty/None.
-    Prevents empty string from being passed into handlers.
+    Validate a user-supplied package quantity string.
+
+    Returns the integer quantity if it's a configured package,
+    or None if invalid.
     """
-    if not data:
+    quantity = parse_myanmar_int(text)
+    if quantity is None:
         return None
-    stripped = data.strip()
-    return stripped if stripped else None
+    if not is_valid_package(quantity):
+        return None
+    return quantity

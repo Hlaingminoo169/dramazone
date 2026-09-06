@@ -1,54 +1,71 @@
 """
 app/utils/pricing.py
-====================
-Pricing logic — loaded from MongoDB settings collection.
-Never hard-codes prices inside handlers.
-"""
 
+Centralised pricing configuration.
+
+All pricing logic lives here.
+Handlers and services import from this module — pricing is NEVER
+duplicated or hard-coded elsewhere.
+
+Current packages:
+    1 ကား  →  1,500 MMK
+    2 ကား  →  3,000 MMK
+    3 ကား  →  4,500 MMK
+    4 ကား  →  6,000 MMK
+    5 ကား  →  5,000 MMK  (discounted bundle)
+
+The 5-movie package is cheaper than 4×1,500 = 6,000 (discount applies).
+
+Quantities NOT in the table are not offered by default.
+"""
 from __future__ import annotations
 
-from pymongo.database import Database
+from typing import Dict, Optional, List, Tuple
 
-from app.utils.numbers import format_mmk
+# ── Package table ─────────────────────────────────────────────────────────────
+# Key   : quantity (number of movies)
+# Value : price in MMK (integer)
+PACKAGES: Dict[int, int] = {
+    1: 1_500,
+    2: 3_000,
+    3: 4_500,
+    4: 6_000,
+    5: 5_000,  # discounted bundle
+}
 
 
-def get_pricing_table(db: Database) -> list[dict]:
+def get_package_price(quantity: int) -> Optional[int]:
     """
-    Return the pricing list from the settings collection.
-    Each item: { quantity: int, price: int, label: str }
+    Return the price in MMK for the given quantity, or None if
+    the quantity is not a configured package.
+
+    Args:
+        quantity: Number of movies requested.
+
+    Returns:
+        Price in MMK, or None if not a valid package.
     """
-    doc = db.settings.find_one({"key": "pricing"})
-    if doc and "value" in doc:
-        return doc["value"]
-    return []
+    return PACKAGES.get(quantity)
 
 
-def get_price_for_quantity(db: Database, quantity: int) -> int | None:
+def get_all_packages() -> List[Tuple[int, int]]:
     """
-    Return the price (MMK) for a given quantity.
-    Returns None if no exact match exists in the pricing table.
+    Return all packages as a sorted list of (quantity, price) tuples.
     """
-    table = get_pricing_table(db)
-    for item in table:
-        if item["quantity"] == quantity:
-            return item["price"]
-    return None
+    return sorted(PACKAGES.items())
 
 
-def calculate_price(db: Database, quantity: int) -> int | None:
+def format_price(amount: int) -> str:
     """
-    Calculate price for a quantity.
-    Returns the configured price if an exact package exists,
-    otherwise returns None (do NOT silently invent a price).
+    Format a price for display.
+
+    Example:
+        format_price(1500)   → "1,500 MMK"
+        format_price(5000)   → "5,000 MMK"
     """
-    return get_price_for_quantity(db, quantity)
+    return f"{amount:,} MMK"
 
 
-def format_price_for_quantity(db: Database, quantity: int) -> str:
-    """
-    Human-readable price string for a quantity, or an error message.
-    """
-    price = calculate_price(db, quantity)
-    if price is None:
-        return f"{quantity} ကားအတွက် သတ်မှတ်ထားသောစျေးနှုန်း မရှိသေးပါ။ Admin ကို ဆက်သွယ်ပါ။"
-    return format_mmk(price)
+def is_valid_package(quantity: int) -> bool:
+    """Return True if the quantity matches a configured package."""
+    return quantity in PACKAGES

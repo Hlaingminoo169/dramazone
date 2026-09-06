@@ -1,77 +1,65 @@
 """
 app/utils/numbers.py
-====================
-Myanmar ↔ English number normalization utility.
 
-Myanmar digits: ၀၁၂၃၄၅၆၇၈၉
-English digits: 0123456789
+Myanmar ↔ English digit conversion and numeric input validation.
 
 Supports:
-  - Myanmar single digit:  "၃"  → 3
-  - Myanmar multi-digit:   "၁၀" → 10
-  - English:               "25" → 25
-  - Mixed not supported (rejected with friendly error)
-"""
+  - English digits:  0-9
+  - Myanmar digits:  ၀-၉  (Unicode U+1040..U+1049)
 
+Usage:
+    from app.utils.numbers import parse_myanmar_int
+
+    parse_myanmar_int("၃")   → 3
+    parse_myanmar_int("10")  → 10
+    parse_myanmar_int("abc") → None
+"""
 from __future__ import annotations
 
-MYANMAR_DIGITS = "၀၁၂၃၄၅၆၇၈၉"
-ENGLISH_DIGITS = "0123456789"
+from typing import Optional
 
-# Map each Myanmar digit character to its English equivalent
-_MM_TO_EN: dict[str, str] = {
-    mm: en for mm, en in zip(MYANMAR_DIGITS, ENGLISH_DIGITS)
-}
+# Myanmar digit → ASCII digit mapping
+_MYANMAR_TO_ENGLISH = str.maketrans(
+    "၀၁၂၃၄၅၆၇၈၉",
+    "0123456789",
+)
 
 
 def myanmar_to_english(text: str) -> str:
     """
-    Convert a string of Myanmar digits to English digit string.
-    Non-Myanmar-digit characters are left unchanged.
+    Translate Myanmar Unicode digits in `text` to their ASCII equivalents.
 
-    Example: "၁၀" → "10"
+    Non-digit characters are left unchanged.
     """
-    return "".join(_MM_TO_EN.get(ch, ch) for ch in text)
+    return text.translate(_MYANMAR_TO_ENGLISH)
 
 
-def normalize_number(text: str) -> int | None:
+def parse_myanmar_int(text: str) -> Optional[int]:
     """
-    Normalize a user-entered number string (Myanmar or English digits)
-    into a Python int.
+    Parse a user-supplied number string that may contain Myanmar digits.
 
     Returns:
-        int  — if the input is a valid positive integer
-        None — if the input is invalid
+        The integer value if the input represents a valid positive integer.
+        None if the input is invalid (letters, negative, decimal, empty, etc.)
 
-    Examples:
-        "3"   → 3
-        "၃"   → 3
-        "10"  → 10
-        "၁၀"  → 10
-        "abc" → None
-        ""    → None
-        "0"   → None  (not a positive quantity)
-        "-1"  → None
+    Rules:
+        - Converts Myanmar digits first.
+        - Must be a pure integer (no decimal point, no letters).
+        - Must be positive (> 0).
     """
     if not text or not text.strip():
         return None
 
-    cleaned = text.strip()
+    converted = myanmar_to_english(text.strip())
 
-    # Convert Myanmar digits to English digits
-    converted = myanmar_to_english(cleaned)
-
-    # After conversion, must consist entirely of digits
+    # Must consist entirely of digits after conversion.
     if not converted.isdigit():
         return None
 
     value = int(converted)
+
+    # Reject zero and negative (though isdigit already rules out negatives).
     if value <= 0:
         return None
 
     return value
-
-
-def format_mmk(amount: int) -> str:
-    """Format an integer as MMK currency string with comma separators."""
-    return f"{amount:,} MMK"

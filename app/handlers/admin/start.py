@@ -1,68 +1,56 @@
 """
 app/handlers/admin/start.py
-=============================
-Admin Bot /start command and main menu.
-"""
 
+Admin Bot /start handler — Step 12.
+
+Only authorised admin Telegram IDs can access this bot.
+"""
 from __future__ import annotations
 
 import logging
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes
+from telegram import KeyboardButton, ReplyKeyboardMarkup, Update
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-from app.handlers.admin.auth import is_admin, unauthorized_response
+from app.config import settings
+from app.services.session_service import clear_session
+from app.types import BotType
 
 logger = logging.getLogger(__name__)
 
-ADMIN_MENU_TEXT = (
-    "👋 <b>DramaZone VIP — Admin Panel</b>\n\n"
-    "ဘာလုပ်မည်နည်း?"
+ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
+    [
+        [KeyboardButton("🔔 Pending Orders")],
+        [KeyboardButton("📦 All Orders")],
+        [KeyboardButton("📊 Statistics")],
+    ],
+    resize_keyboard=True,
 )
 
-ADMIN_MENU_KEYBOARD = InlineKeyboardMarkup([
-    [InlineKeyboardButton("🔔 Pending Orders", callback_data="admin:pending")],
-    [InlineKeyboardButton("📦 All Orders", callback_data="admin:all_orders")],
-    [InlineKeyboardButton("📊 Statistics", callback_data="admin:stats")],
-])
+DENIED_TEXT = (
+    "🚫 ဤ Bot ကို သင်အသုံးပြုခွင့် မရှိပါ။\n\n"
+    "Authorised admins only."
+)
 
 
-async def admin_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start — verify admin, show menu."""
-    user = update.effective_user
-    if not user or not is_admin(user.id):
-        await unauthorized_response(update, context)
+async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /start for the admin bot."""
+    tg_user = update.effective_user
+    if tg_user is None:
         return
 
+    if not settings.is_admin(tg_user.id):
+        logger.warning("Unauthorised /start attempt by user %s", tg_user.id)
+        await update.message.reply_text(DENIED_TEXT)
+        return
+
+    clear_session(tg_user.id, BotType.ADMIN)
     await update.message.reply_text(
-        ADMIN_MENU_TEXT,
-        parse_mode="HTML",
+        f"👋 *DramaZone VIP Admin Panel*\n\nကြိုဆိုပါတယ်၊ {tg_user.first_name}!\n\nMenu မှ ရွေးချယ်ပေးပါ။",
+        parse_mode="Markdown",
         reply_markup=ADMIN_MENU_KEYBOARD,
     )
 
 
-async def admin_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Route main menu callbacks."""
-    query = update.callback_query
-    user = update.effective_user
-
-    if not user or not is_admin(user.id):
-        await unauthorized_response(update, context)
-        return
-
-    await query.answer()
-    data = query.data
-
-    if data == "admin:pending":
-        from app.handlers.admin.orders import show_pending_orders
-        await show_pending_orders(update, context)
-    elif data == "admin:all_orders":
-        from app.handlers.admin.orders import show_all_orders
-        await show_all_orders(update, context)
-    elif data == "admin:stats":
-        from app.handlers.admin.orders import show_statistics
-        await show_statistics(update, context)
-    elif data == "admin:home":
-        await query.edit_message_text(
-            ADMIN_MENU_TEXT, parse_mode="HTML", reply_markup=ADMIN_MENU_KEYBOARD
-        )
+def register(app: Application) -> None:
+    app.add_handler(CommandHandler("start", admin_start))

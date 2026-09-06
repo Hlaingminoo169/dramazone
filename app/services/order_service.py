@@ -1,50 +1,68 @@
 """
 app/services/order_service.py
-==============================
-All order-related database operations.
-Uses atomic MongoDB operations to prevent race conditions.
-"""
 
+Order lifecycle management.
+
+All order creation, status transitions, and retrieval live here.
+Handlers call these functions — they contain NO business logic themselves.
+
+Atomicity:
+  Approve/Reject use a conditional find_one_and_update that only succeeds
+  when the order is in WAITING_APPROVAL status, preventing duplicate
+  processing even if two admins act simultaneously.
+"""
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
-from pymongo.database import Database
+from bson import ObjectId
+from pymongo import ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from app.types import OrderStatus, PaymentMethod
+from app.database.mongodb import get_collection
+from app.types import Collection, OrderStatus
 from app.utils.order_code import generate_order_code
 
 logger = logging.getLogger(__name__)
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
 def create_order(
-    db: Database,
     telegram_user_id: int,
     quantity: int,
     amount: int,
-    selected_movies: list[dict],  # list of movie snapshots
+    payment_method: str,
+    selected_movies: List[Dict[str, Any]],  # snapshots: [{movieId, title, channelLink}]
 ) -> dict:
     """
     Create a new order in PENDING_PAYMENT status.
-    Retries on duplicate orderCode (collision is rare but possible).
-    Returns the inserted order document.
+
+    Retries up to 3 times on order code collision (extremely rare).
+    Raises RuntimeError if all retries fail.
+
+    Args:
+        telegram_user_id: Customer's Telegram user ID.
+        quantity: Number of movies in the package.
+        amount: Total price in MMK.
+        payment_method: "KPay" or "Wave".
+        selected_movies: Snapshot list of {movieId, title, channelLink}.
+
+    Returns:
+        The inserted order document.
     """
-    for attempt in range(5):
+    col = get_collection(Collection.ORDERS)
+    now = datetime.now(timezone.utc)
+
+    for attempt in range(3):
         order_code = generate_order_code()
-        now = _now()
         doc = {
             "orderCode": order_code,
             "telegramUserId": telegram_user_id,
             "quantity": quantity,
             "amount": amount,
-            "paymentMethod": None,
-            "status": OrderStatus.PENDING_PAYMENT.value,
+            "paymentMethod": payment_method,
+            "status": OrderStatus.PENDING_PAYMENT,
             "selectedMovies": selected_movies,
             "paymentScreenshotFileId": None,
             "rejectionReason": None,
@@ -56,215 +74,165 @@ def create_order(
             "updatedAt": now,
         }
         try:
-            result = db.orders.insert_one(doc)
+            result = col.insert_one(doc)
             doc["_id"] = result.inserted_id
-            logger.info("Order created: %s for user %d", order_code, telegram_user_id)
+            logger.info(
+                "Order created: %s for user %s amount=%d",
+                order_code, telegram_user_id, amount,
+            )
             return doc
         except DuplicateKeyError:
-            logger.warning("Order code collision on attempt %d: %s", attempt + 1, order_code)
+            logger.warning("Order code collision on %s (attempt %d)", order_code, attempt + 1)
 
-    raise RuntimeError("Failed to generate unique order code after 5 attempts.")
-
-
-def get_order_by_code(db: Database, order_code: str) -> dict | None:
-    """Return order by its human-readable code."""
-    return db.orders.find_one({"orderCode": order_code})
+    raise RuntimeError("Failed to generate a unique order code after 3 attempts.")
 
 
-def get_pending_payment_order(db: Database, telegram_user_id: int) -> dict | None:
-    """Return the most recent PENDING_PAYMENT order for a user."""
-    return db.orders.find_one(
-        {
-            "telegramUserId": telegram_user_id,
-            "status": OrderStatus.PENDING_PAYMENT.value,
-        },
-        sort=[("createdAt", -1)],
-    )
-
-
-def get_waiting_approval_order(db: Database, telegram_user_id: int) -> dict | None:
-    """Return the most recent WAITING_APPROVAL order for a user."""
-    return db.orders.find_one(
-        {
-            "telegramUserId": telegram_user_id,
-            "status": OrderStatus.WAITING_APPROVAL.value,
-        },
-        sort=[("createdAt", -1)],
-    )
-
-
-def submit_payment_screenshot(
-    db: Database,
-    order_code: str,
-    telegram_user_id: int,
-    file_id: str,
-    payment_method: PaymentMethod,
-) -> bool:
+def attach_screenshot(order_id: str, file_id: str) -> Optional[dict]:
     """
-    Record payment screenshot and move order to WAITING_APPROVAL.
-    Returns True on success, False if order not found or already processed.
-    Validates ownership — user can only update their own order.
+    Attach the payment screenshot file ID and move order to WAITING_APPROVAL.
+
+    Only transitions from PENDING_PAYMENT → WAITING_APPROVAL.
+    Returns updated document, or None if order not found / wrong status.
     """
-    now = _now()
-    result = db.orders.update_one(
+    col = get_collection(Collection.ORDERS)
+    now = datetime.now(timezone.utc)
+    return col.find_one_and_update(
         {
-            "orderCode": order_code,
-            "telegramUserId": telegram_user_id,
-            "status": OrderStatus.PENDING_PAYMENT.value,
+            "_id": ObjectId(order_id),
+            "status": OrderStatus.PENDING_PAYMENT,
         },
         {
             "$set": {
                 "paymentScreenshotFileId": file_id,
-                "paymentMethod": payment_method.value,
-                "status": OrderStatus.WAITING_APPROVAL.value,
+                "status": OrderStatus.WAITING_APPROVAL,
                 "updatedAt": now,
             }
         },
+        return_document=ReturnDocument.AFTER,
     )
-    if result.modified_count == 1:
-        logger.info("Order %s moved to WAITING_APPROVAL.", order_code)
-        return True
-    logger.warning(
-        "Failed to submit screenshot for order %s (user %d) — not found or wrong status.",
-        order_code,
-        telegram_user_id,
-    )
-    return False
 
 
-def approve_order(
-    db: Database,
-    order_code: str,
-    approved_by: int,  # admin Telegram ID
-) -> tuple[bool, str]:
+def approve_order(order_id: str, admin_telegram_id: int) -> Optional[dict]:
     """
     Atomically approve an order.
-    Returns (success: bool, message: str).
-    Uses findOneAndUpdate to prevent race conditions between two admins.
+
+    Only succeeds when order.status == WAITING_APPROVAL.
+    Returns updated document on success, None if already processed.
     """
-    now = _now()
-    updated = db.orders.find_one_and_update(
+    col = get_collection(Collection.ORDERS)
+    now = datetime.now(timezone.utc)
+    doc = col.find_one_and_update(
         {
-            "orderCode": order_code,
-            "status": OrderStatus.WAITING_APPROVAL.value,
+            "_id": ObjectId(order_id),
+            "status": OrderStatus.WAITING_APPROVAL,
         },
         {
             "$set": {
-                "status": OrderStatus.APPROVED.value,
-                "approvedBy": approved_by,
+                "status": OrderStatus.APPROVED,
+                "approvedBy": admin_telegram_id,
                 "approvedAt": now,
                 "updatedAt": now,
             }
         },
-        return_document=True,  # return the updated document
+        return_document=ReturnDocument.AFTER,
     )
-    if updated:
-        logger.info("Order %s approved by admin %d.", order_code, approved_by)
-        return True, "approved"
-
-    # Check if already processed
-    existing = get_order_by_code(db, order_code)
-    if existing and existing["status"] != OrderStatus.WAITING_APPROVAL.value:
-        return False, "already_processed"
-
-    return False, "not_found"
+    if doc:
+        logger.info("Order %s approved by admin %s", doc["orderCode"], admin_telegram_id)
+    return doc
 
 
 def reject_order(
-    db: Database,
-    order_code: str,
-    rejected_by: int,
+    order_id: str,
+    admin_telegram_id: int,
     reason: str,
-) -> tuple[bool, str]:
+) -> Optional[dict]:
     """
     Atomically reject an order with a reason.
-    Returns (success: bool, message: str).
+
+    Only succeeds when order.status == WAITING_APPROVAL.
+    Returns updated document on success, None if already processed.
     """
-    now = _now()
-    updated = db.orders.find_one_and_update(
+    col = get_collection(Collection.ORDERS)
+    now = datetime.now(timezone.utc)
+    doc = col.find_one_and_update(
         {
-            "orderCode": order_code,
-            "status": OrderStatus.WAITING_APPROVAL.value,
+            "_id": ObjectId(order_id),
+            "status": OrderStatus.WAITING_APPROVAL,
         },
         {
             "$set": {
-                "status": OrderStatus.REJECTED.value,
+                "status": OrderStatus.REJECTED,
                 "rejectionReason": reason,
-                "rejectedBy": rejected_by,
+                "rejectedBy": admin_telegram_id,
                 "rejectedAt": now,
                 "updatedAt": now,
             }
         },
-        return_document=True,
+        return_document=ReturnDocument.AFTER,
     )
-    if updated:
-        logger.info("Order %s rejected by admin %d.", order_code, rejected_by)
-        return True, "rejected"
-
-    existing = get_order_by_code(db, order_code)
-    if existing and existing["status"] != OrderStatus.WAITING_APPROVAL.value:
-        return False, "already_processed"
-
-    return False, "not_found"
+    if doc:
+        logger.info("Order %s rejected by admin %s", doc["orderCode"], admin_telegram_id)
+    return doc
 
 
-def cancel_order(db: Database, order_code: str, telegram_user_id: int) -> bool:
-    """Cancel a PENDING_PAYMENT order. User can only cancel their own orders."""
-    now = _now()
-    result = db.orders.update_one(
-        {
-            "orderCode": order_code,
-            "telegramUserId": telegram_user_id,
-            "status": OrderStatus.PENDING_PAYMENT.value,
-        },
-        {
-            "$set": {
-                "status": OrderStatus.CANCELLED.value,
-                "updatedAt": now,
-            }
-        },
-    )
-    return result.modified_count == 1
+def get_order_by_id(order_id: str) -> Optional[dict]:
+    """Return an order by its MongoDB _id string."""
+    try:
+        oid = ObjectId(order_id)
+    except Exception:
+        return None
+    col = get_collection(Collection.ORDERS)
+    return col.find_one({"_id": oid})
 
 
-def get_user_orders(
-    db: Database,
+def get_orders_for_user(
     telegram_user_id: int,
     limit: int = 10,
     skip: int = 0,
-) -> list[dict]:
-    """Return a user's order history, newest first. Only their own orders."""
+) -> List[dict]:
+    """
+    Return paginated orders for a single customer, newest first.
+    Only returns orders belonging to this user (security enforced here).
+    """
+    col = get_collection(Collection.ORDERS)
     return list(
-        db.orders.find(
-            {"telegramUserId": telegram_user_id}
-        )
+        col.find({"telegramUserId": telegram_user_id})
         .sort("createdAt", -1)
         .skip(skip)
         .limit(limit)
     )
 
 
-def get_pending_orders(db: Database, limit: int = 20) -> list[dict]:
-    """Return all WAITING_APPROVAL orders for admin review, oldest first."""
+def count_orders_for_user(telegram_user_id: int) -> int:
+    """Return total number of orders for a user (for pagination)."""
+    col = get_collection(Collection.ORDERS)
+    return col.count_documents({"telegramUserId": telegram_user_id})
+
+
+def get_pending_orders(limit: int = 20) -> List[dict]:
+    """Return orders awaiting admin review (WAITING_APPROVAL), newest first."""
+    col = get_collection(Collection.ORDERS)
     return list(
-        db.orders.find({"status": OrderStatus.WAITING_APPROVAL.value})
-        .sort("createdAt", 1)
+        col.find({"status": OrderStatus.WAITING_APPROVAL})
+        .sort("createdAt", -1)
         .limit(limit)
     )
 
 
-def get_all_orders(db: Database, limit: int = 20, skip: int = 0) -> list[dict]:
-    """Return all orders for admin, newest first."""
+def get_all_orders(limit: int = 20, skip: int = 0) -> List[dict]:
+    """Return all orders (admin view), newest first."""
+    col = get_collection(Collection.ORDERS)
     return list(
-        db.orders.find({})
+        col.find({})
         .sort("createdAt", -1)
         .skip(skip)
         .limit(limit)
     )
 
 
-def get_statistics(db: Database) -> dict:
+def get_statistics() -> Dict[str, Any]:
     """Return basic order statistics for the admin dashboard."""
+    col = get_collection(Collection.ORDERS)
     pipeline = [
         {
             "$group": {
@@ -274,16 +242,19 @@ def get_statistics(db: Database) -> dict:
             }
         }
     ]
-    results = list(db.orders.aggregate(pipeline))
-    stats: dict = {
-        "total_orders": db.orders.count_documents({}),
-        "total_users": db.users.count_documents({}),
+    results = list(col.aggregate(pipeline))
+    stats: Dict[str, Any] = {
         "by_status": {},
-        "total_revenue": 0,
+        "total_orders": 0,
+        "total_approved_amount": 0,
     }
     for row in results:
         status = row["_id"]
-        stats["by_status"][status] = row["count"]
-        if status == OrderStatus.APPROVED.value:
-            stats["total_revenue"] = row["total_amount"]
+        stats["by_status"][status] = {
+            "count": row["count"],
+            "total_amount": row["total_amount"],
+        }
+        stats["total_orders"] += row["count"]
+        if status == OrderStatus.APPROVED:
+            stats["total_approved_amount"] = row["total_amount"]
     return stats

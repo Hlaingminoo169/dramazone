@@ -1,99 +1,103 @@
 """
 app/services/session_service.py
-================================
+
 MongoDB-backed session management.
-No in-memory state — safe for stateless/serverless hosting.
 
-Session document structure:
-{
-    telegramId: int,
-    botType:    "CUSTOMER" | "ADMIN",
-    state:      str,       # CustomerState or AdminState value
-    data:       dict,      # arbitrary session payload
-    updatedAt:  datetime,  # TTL field — auto-deleted after 24h
-}
+Because FastAPI webhooks are stateless (requests may hit any instance),
+user session state MUST be stored in MongoDB — NOT in Python dicts.
+
+Sessions expire automatically after 24 hours via a MongoDB TTL index
+(see app/database/indexes.py).
 """
-
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Dict, Optional
 
-from pymongo.database import Database
+from pymongo import ReturnDocument
 
-from app.types import BotType
+from app.database.mongodb import get_collection
+from app.types import BotType, Collection
 
 logger = logging.getLogger(__name__)
 
 
-def _now() -> datetime:
-    return datetime.now(timezone.utc)
-
-
-def get_session(db: Database, telegram_id: int, bot_type: BotType) -> dict:
-    """
-    Return the session document for a user, or a blank session if none exists.
-    Never returns None — callers always get a usable dict.
-    """
-    doc = db.sessions.find_one(
-        {"telegramId": telegram_id, "botType": bot_type.value}
-    )
-    if doc:
-        return doc
-    return {
-        "telegramId": telegram_id,
-        "botType": bot_type.value,
-        "state": "IDLE",
-        "data": {},
-        "updatedAt": _now(),
-    }
+def get_session(telegram_id: int, bot_type: str) -> Optional[dict]:
+    """Return the current session document for a user, or None."""
+    col = get_collection(Collection.SESSIONS)
+    return col.find_one({"telegramId": telegram_id, "botType": bot_type})
 
 
 def set_session(
-    db: Database,
     telegram_id: int,
-    bot_type: BotType,
+    bot_type: str,
     state: str,
-    data: dict[str, Any] | None = None,
-) -> None:
+    data: Optional[Dict[str, Any]] = None,
+) -> dict:
     """
-    Upsert the session for a user. Always refreshes updatedAt (TTL reset).
+    Upsert a session for the given user.
+
+    Always updates `updatedAt` so the TTL index resets the 24-hour clock.
     """
-    db.sessions.update_one(
-        {"telegramId": telegram_id, "botType": bot_type.value},
+    col = get_collection(Collection.SESSIONS)
+    now = datetime.now(timezone.utc)
+    doc = col.find_one_and_update(
+        {"telegramId": telegram_id, "botType": bot_type},
         {
             "$set": {
                 "state": state,
                 "data": data or {},
-                "updatedAt": _now(),
-            }
+                "updatedAt": now,
+            },
+            "$setOnInsert": {
+                "telegramId": telegram_id,
+                "botType": bot_type,
+                "createdAt": now,
+            },
         },
         upsert=True,
+        return_document=ReturnDocument.AFTER,
     )
-
-
-def clear_session(db: Database, telegram_id: int, bot_type: BotType) -> None:
-    """Reset a user's session to IDLE with empty data."""
-    set_session(db, telegram_id, bot_type, state="IDLE", data={})
+    return doc
 
 
 def update_session_data(
-    db: Database,
     telegram_id: int,
-    bot_type: BotType,
-    data: dict[str, Any],
-) -> None:
+    bot_type: str,
+    data: Dict[str, Any],
+) -> Optional[dict]:
     """
-    Merge new data into an existing session without changing the state.
+    Merge new key/value pairs into the session's `data` field
+    without changing the current state.
     """
-    db.sessions.update_one(
-        {"telegramId": telegram_id, "botType": bot_type.value},
-        {
-            "$set": {
-                "updatedAt": _now(),
-            },
-            "$set": {"data": data},
-        },
-        upsert=True,
+    col = get_collection(Collection.SESSIONS)
+    now = datetime.now(timezone.utc)
+    # Build a $set of "data.<key>" paths to merge without overwriting other keys.
+    set_fields: Dict[str, Any] = {"updatedAt": now}
+    for k, v in data.items():
+        set_fields[f"data.{k}"] = v
+
+    return col.find_one_and_update(
+        {"telegramId": telegram_id, "botType": bot_type},
+        {"$set": set_fields},
+        return_document=ReturnDocument.AFTER,
     )
+
+
+def clear_session(telegram_id: int, bot_type: str) -> None:
+    """Delete the session document for the given user."""
+    col = get_collection(Collection.SESSIONS)
+    col.delete_one({"telegramId": telegram_id, "botType": bot_type})
+
+
+def get_session_state(telegram_id: int, bot_type: str) -> Optional[str]:
+    """Shortcut — return just the state string."""
+    session = get_session(telegram_id, bot_type)
+    return session.get("state") if session else None
+
+
+def get_session_data(telegram_id: int, bot_type: str) -> Dict[str, Any]:
+    """Shortcut — return just the data dict (empty dict if no session)."""
+    session = get_session(telegram_id, bot_type)
+    return session.get("data", {}) if session else {}

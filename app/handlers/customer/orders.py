@@ -1,128 +1,164 @@
 """
 app/handlers/customer/orders.py
-=================================
-Order history and contact admin handlers.
-"""
 
+Order history handler — Step 16.
+Contact admin handler — Step 17.
+"""
 from __future__ import annotations
 
 import logging
+from datetime import timezone
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, ContextTypes, MessageHandler, filters
 
-from app.config import get_settings
-from app.database.mongodb import get_db
-from app.services.order_service import get_user_orders
+from app.config import settings
+from app.services.order_service import get_orders_for_user, count_orders_for_user
 from app.types import OrderStatus
+from app.utils.pricing import format_price
 
 logger = logging.getLogger(__name__)
 
-STATUS_LABELS = {
-    OrderStatus.PENDING_PAYMENT.value: "⏳ ငွေပေးချေစောင့်ဆိုင်းနေသည်",
-    OrderStatus.WAITING_APPROVAL.value: "🔍 စစ်ဆေးနေဆဲ",
-    OrderStatus.APPROVED.value: "✅ အတည်ပြုပြီး",
-    OrderStatus.REJECTED.value: "❌ ငြင်းပယ်ခဲ့သည်",
-    OrderStatus.CANCELLED.value: "🚫 ပယ်ဖျက်ခဲ့သည်",
-}
+PAGE_SIZE = 5
+CB_ORDER_PAGE = "ord_page"
 
 
-async def show_order_history(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show customer's own order history — newest first."""
-    user = update.effective_user
-    db = get_db()
-
-    orders = get_user_orders(db, user.id, limit=10)
-
-    if not orders:
-        text = (
-            "📦 <b>ကျွန်ုပ်၏ Order များ</b>\n\n"
-            "Order မှတ်တမ်း မရှိသေးပါ။\n"
-            "🎬 VIP ကားဝယ်ရန် ပထမဆုံး order တင်ပါ။"
-        )
-        keyboard = InlineKeyboardMarkup([[
-            InlineKeyboardButton("🎬 VIP ကားဝယ်မည်", callback_data="menu:buy")
-        ]])
-        query = update.callback_query
-        if query:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
-        else:
-            await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
-        return
-
-    lines = ["📦 <b>ကျွန်ုပ်၏ Order များ</b>\n"]
-
-    for order in orders:
-        order_code = order.get("orderCode", "N/A")
-        status = order.get("status", "")
-        status_label = STATUS_LABELS.get(status, status)
-        amount = order.get("amount", 0)
-        quantity = order.get("quantity", 0)
-        payment_method = order.get("paymentMethod") or "N/A"
-        created_at = order.get("createdAt")
-        date_str = created_at.strftime("%Y-%m-%d") if created_at else "N/A"
-
-        movie_titles = ", ".join(
-            m.get("title", "?")[:20] for m in order.get("selectedMovies", [])
-        )
-
-        block = (
-            f"━━━━━━━━━━━━━━━━\n"
-            f"🆔 <b>{order_code}</b>\n"
-            f"📅 {date_str}\n"
-            f"🎬 {movie_titles}\n"
-            f"🎯 {quantity} ကား | 💰 {amount:,} MMK\n"
-            f"💳 {payment_method}\n"
-            f"📊 {status_label}"
-        )
-
-        if status == OrderStatus.REJECTED.value:
-            reason = order.get("rejectionReason", "")
-            if reason:
-                block += f"\n💬 <i>{reason}</i>"
-
-        lines.append(block)
-
-    text = "\n".join(lines)
-
-    keyboard = InlineKeyboardMarkup([[
-        InlineKeyboardButton("🏠 မူလစာမျက်နှာ", callback_data="menu:home")
-    ]])
-
-    query = update.callback_query
-    if query:
-        await query.answer()
-        try:
-            await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
-        except Exception:
-            await query.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
-    else:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+def _status_label(status: str) -> str:
+    labels = {
+        OrderStatus.PENDING_PAYMENT: "⏳ ငွေပေးချေစောင့်",
+        OrderStatus.WAITING_APPROVAL: "🔍 စစ်ဆေးနေ",
+        OrderStatus.APPROVED: "✅ အတည်ပြုပြီး",
+        OrderStatus.REJECTED: "❌ ငြင်းပယ်ပြီး",
+        OrderStatus.CANCELLED: "🚫 ပယ်ဖျက်ပြီး",
+    }
+    return labels.get(status, status)
 
 
-async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show both admin contact links."""
-    settings = get_settings()
-    admin_username = settings.admin_username
-    admin_username_2 = settings.admin_username_2
+def _format_order(order: dict, index: int) -> str:
+    """Format a single order for display."""
+    movies = order.get("selectedMovies", [])
+    movie_list = "\n".join(f"    • {m['title']}" for m in movies)
+
+    # Format date in UTC.
+    created = order.get("createdAt")
+    date_str = created.strftime("%Y-%m-%d %H:%M") if created else "—"
 
     text = (
-        f"📞 <b>Admin ကို ဆက်သွယ်မည်</b>\n\n"
-        f"မေးခွန်းများ သို့မဟုတ် အကူအညီလိုအပ်ပါက\n"
-        f"အောက်ပါ Admin များထံ တိုက်ရိုက်ဆက်သွယ်နိုင်ပါသည်။"
+        f"━━━━━━━━━━━━━━━━━\n"
+        f"*Order {index}*\n"
+        f"ID: `{order['orderCode']}`\n"
+        f"ရက်: {date_str}\n"
+        f"ကားများ:\n{movie_list}\n"
+        f"အရေအတွက်: {order['quantity']}\n"
+        f"ငွေပမာဏ: {format_price(order['amount'])}\n"
+        f"ပေးချေမှု: {order['paymentMethod']}\n"
+        f"Status: {_status_label(order['status'])}"
     )
 
-    keyboard = InlineKeyboardMarkup([
-        [InlineKeyboardButton(f"💬 @{admin_username}",
-                              url=f"https://t.me/{admin_username}")],
-        [InlineKeyboardButton(f"💬 @{admin_username_2}",
-                              url=f"https://t.me/{admin_username_2}")],
-        [InlineKeyboardButton("🏠 မူလစာမျက်နှာ", callback_data="menu:home")],
-    ])
+    if order["status"] == OrderStatus.REJECTED and order.get("rejectionReason"):
+        text += f"\nအကြောင်းရင်း: {order['rejectionReason']}"
 
+    return text
+
+
+async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show the user's order history (first page)."""
+    from app.handlers.customer.start import BTN_ORDERS
+
+    if update.message and update.message.text != BTN_ORDERS:
+        return
+
+    tg_user = update.effective_user
+    await _send_orders_page(update, context, tg_user.id, page=0)
+
+
+async def handle_order_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle pagination callbacks."""
     query = update.callback_query
-    if query:
-        await query.answer()
-        await query.edit_message_text(text, parse_mode="HTML", reply_markup=keyboard)
+    await query.answer()
+    tg_user = update.effective_user
+
+    try:
+        page = int(query.data.split(":")[1])
+    except (IndexError, ValueError):
+        return
+
+    await _send_orders_page(update, context, tg_user.id, page=page, edit=True)
+
+
+async def _send_orders_page(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    telegram_user_id: int,
+    page: int,
+    edit: bool = False,
+) -> None:
+    total = count_orders_for_user(telegram_user_id)
+
+    if total == 0:
+        text = "📦 *ကျွန်ုပ်၏ Orders*\n\nOrder တစ်ခုမှ မရှိသေးပါ။"
+        if edit:
+            await update.callback_query.edit_message_text(text, parse_mode="Markdown")
+        else:
+            await update.message.reply_text(text, parse_mode="Markdown")
+        return
+
+    orders = get_orders_for_user(telegram_user_id, limit=PAGE_SIZE, skip=page * PAGE_SIZE)
+    if not orders:
+        await (update.callback_query or update).answer("နောက်ထပ် Order မရှိပါ။", show_alert=True)
+        return
+
+    header = f"📦 *ကျွန်ုပ်၏ Orders* ({total} ခု)\n"
+    body = "\n".join(
+        _format_order(order, page * PAGE_SIZE + i + 1)
+        for i, order in enumerate(orders)
+    )
+    text = header + body
+
+    # Pagination buttons.
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(
+            InlineKeyboardButton("⬅️ ယခင်", callback_data=f"{CB_ORDER_PAGE}:{page - 1}")
+        )
+    if (page + 1) * PAGE_SIZE < total:
+        nav_buttons.append(
+            InlineKeyboardButton("➡️ နောက်", callback_data=f"{CB_ORDER_PAGE}:{page + 1}")
+        )
+
+    keyboard = InlineKeyboardMarkup([nav_buttons]) if nav_buttons else None
+
+    if edit:
+        await update.callback_query.edit_message_text(
+            text, parse_mode="Markdown", reply_markup=keyboard
+        )
     else:
-        await update.message.reply_text(text, parse_mode="HTML", reply_markup=keyboard)
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+
+# ── Contact admin (Step 17) ──────────────────────────────────────────────────
+async def contact_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Provide admin contact link."""
+    from app.handlers.customer.start import BTN_CONTACT
+
+    if update.message and update.message.text != BTN_CONTACT:
+        return
+
+    admin_username = settings.admin_username
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"💬 @{admin_username}", url=f"https://t.me/{admin_username}")]
+    ])
+    await update.message.reply_text(
+        "📞 *Admin ကို ဆက်သွယ်မည်*\n\nအောက်ပါ Link မှ Admin ကို တိုက်ရိုက်ဆက်သွယ်နိုင်ပါသည်။",
+        parse_mode="Markdown",
+        reply_markup=keyboard,
+    )
+
+
+def register(app: Application) -> None:
+    """Register order history and contact handlers."""
+    from app.handlers.customer.start import BTN_ORDERS, BTN_CONTACT
+
+    app.add_handler(MessageHandler(filters.Text([BTN_ORDERS]), show_orders))
+    app.add_handler(MessageHandler(filters.Text([BTN_CONTACT]), contact_admin))
+    app.add_handler(CallbackQueryHandler(handle_order_page_callback, pattern=f"^{CB_ORDER_PAGE}:"))

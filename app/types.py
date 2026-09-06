@@ -1,45 +1,52 @@
 """
-DramaZone VIP Bot System
-========================
-Type definitions and enums shared across the entire application.
+app/types.py
+
+Shared constants and type definitions used throughout the project.
+
+Using string literals (not Enum) keeps MongoDB documents human-readable.
 """
+from __future__ import annotations
 
-from enum import Enum
 
-
-class OrderStatus(str, Enum):
-    """Fixed order status values — never use raw strings in application code."""
+# ── Order statuses ────────────────────────────────────────────────────────────
+class OrderStatus:
     PENDING_PAYMENT = "PENDING_PAYMENT"
     WAITING_APPROVAL = "WAITING_APPROVAL"
     APPROVED = "APPROVED"
     REJECTED = "REJECTED"
     CANCELLED = "CANCELLED"
 
-
-class PaymentMethod(str, Enum):
-    """Supported payment methods."""
-    KPAY = "KPAY"
-    WAVE = "WAVE"
+    ALL = (PENDING_PAYMENT, WAITING_APPROVAL, APPROVED, REJECTED, CANCELLED)
 
 
-class BotType(str, Enum):
-    """Which bot a session belongs to."""
-    CUSTOMER = "CUSTOMER"
-    ADMIN = "ADMIN"
-
-
-class CustomerState(str, Enum):
-    """Customer conversation states stored in MongoDB sessions."""
-    IDLE = "IDLE"
+# ── Session states ─────────────────────────────────────────────────────────────
+class SessionState:
     SELECTING_PACKAGE = "SELECTING_PACKAGE"
-    ENTERING_CUSTOM_QUANTITY = "ENTERING_CUSTOM_QUANTITY"
     SELECTING_MOVIES = "SELECTING_MOVIES"
     CONFIRMING_ORDER = "CONFIRMING_ORDER"
-    SELECTING_PAYMENT_METHOD = "SELECTING_PAYMENT_METHOD"
+    SELECTING_PAYMENT = "SELECTING_PAYMENT"
     WAITING_SCREENSHOT = "WAITING_SCREENSHOT"
-
-
-class AdminState(str, Enum):
-    """Admin conversation states stored in MongoDB sessions."""
-    IDLE = "IDLE"
     WAITING_FOR_REJECTION_REASON = "WAITING_FOR_REJECTION_REASON"
+
+
+# ── Bot types (used in sessions) ──────────────────────────────────────────────
+class BotType:
+    CUSTOMER = "customer"
+    ADMIN = "admin"
+
+
+# ── Payment methods ───────────────────────────────────────────────────────────
+class PaymentMethod:
+    KPAY = "KPay"
+    WAVE = "Wave"
+
+    ALL = (KPAY, WAVE)
+
+
+# ── Collection names ──────────────────────────────────────────────────────────
+class Collection:
+    USERS = "users"
+    MOVIES = "movies"
+    ORDERS = "orders"
+    SESSIONS = "sessions"
+    SETTINGS = "settings"

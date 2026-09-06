@@ -1,59 +1,47 @@
 """
-DramaZone VIP Bot System
-========================
-Central configuration management.
-All secrets come from environment variables — nothing is hard-coded.
+app/config.py
+Central configuration loaded from environment variables.
+All settings are read once at startup via pydantic-settings.
 """
-
 from __future__ import annotations
 
-import logging
+import os
 from functools import lru_cache
-from typing import Optional
+from typing import List
 
-from pydantic import field_validator, model_validator
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
     """
-    Application settings loaded from environment variables.
-    pydantic-settings automatically reads from .env when python-dotenv is installed.
+    Application settings.
+
+    Values are read from the environment (or .env file).
+    Secrets are NEVER hard-coded or logged.
     """
 
     model_config = SettingsConfigDict(
+        # Load .env automatically when present (local dev).
+        # In production, real env-vars take priority.
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
 
-    # ── Telegram Bot Tokens ──────────────────────────────────────────────────
-    customer_bot_token: str
-    admin_bot_token: str
+    # ── Telegram ─────────────────────────────────────────────────────────────
+    customer_bot_token: str = ""
+    admin_bot_token: str = ""
 
-    # ── MongoDB ──────────────────────────────────────────────────────────────
-    mongodb_uri: str
+    # ── MongoDB ───────────────────────────────────────────────────────────────
+    mongodb_uri: str = ""
     mongodb_db_name: str = "dramazone_vip"
 
-    # ── Admin Authorization ───────────────────────────────────────────────────
-    admin_telegram_ids_raw: str = ""  # comma-separated string from env
-
-    @property
-    def admin_telegram_ids(self) -> list[int]:
-        """Parse ADMIN_TELEGRAM_IDS into a list of integers."""
-        if not self.admin_telegram_ids_raw:
-            return []
-        return [
-            int(tid.strip())
-            for tid in self.admin_telegram_ids_raw.split(",")
-            if tid.strip().isdigit()
-        ]
-
+    # ── Admins ────────────────────────────────────────────────────────────────
+    # Stored as comma-separated string in env; parsed to a list of ints.
+    admin_telegram_ids: str = "1673861706,1655754454"
     admin_username: str = "myatnyein21"
-    admin_username_2: str = "hlaing_min_16"
 
     # ── Payment ───────────────────────────────────────────────────────────────
     kpay_phone: str = ""
@@ -61,75 +49,46 @@ class Settings(BaseSettings):
     wave_phone: str = ""
     wave_account_name: str = ""
 
-    # ── Webhook Secrets ───────────────────────────────────────────────────────
+    # ── QR codes (optional Telegram file IDs) ────────────────────────────────
+    qr_kpay_file_id: str = ""
+    qr_wave_file_id: str = ""
+
+    # ── Webhook ───────────────────────────────────────────────────────────────
     customer_webhook_secret: str = ""
     admin_webhook_secret: str = ""
+    webhook_base_url: str = ""
 
-    # ── QR Codes (optional — app works without these) ────────────────────────
-    qr_kpay_file_id: Optional[str] = None
-    qr_wave_file_id: Optional[str] = None
+    # ── Deployment mode ───────────────────────────────────────────────────────
+    # 'polling' for local dev, 'webhook' for production
+    bot_mode: str = "polling"
 
-    # ── Hosting ───────────────────────────────────────────────────────────────
-    base_webhook_url: str = ""  # e.g. https://your-app.onrender.com
+    # ── Application port (injected by hosting platforms) ─────────────────────
+    port: int = 8000
 
-    # ── Logging ───────────────────────────────────────────────────────────────
-    log_level: str = "INFO"
+    # ── Computed helpers ──────────────────────────────────────────────────────
+    @property
+    def admin_ids(self) -> List[int]:
+        """Parsed list of admin Telegram user IDs."""
+        return [
+            int(tid.strip())
+            for tid in self.admin_telegram_ids.split(",")
+            if tid.strip().isdigit()
+        ]
 
-    # ── Field aliases for env var names with underscores ─────────────────────
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        case_sensitive=False,
-        extra="ignore",
-        # Map ADMIN_TELEGRAM_IDS env var → admin_telegram_ids_raw field
-        populate_by_name=True,
-    )
-
-    @field_validator("customer_bot_token", "admin_bot_token", mode="before")
-    @classmethod
-    def token_must_not_be_empty(cls, v: str, info) -> str:
-        if not v or not v.strip():
-            raise ValueError(
-                f"{info.field_name} must not be empty. "
-                "Set it in your .env file."
-            )
-        return v.strip()
-
-    @field_validator("mongodb_uri", mode="before")
-    @classmethod
-    def mongodb_uri_must_not_be_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError(
-                "MONGODB_URI must not be empty. "
-                "Copy your Atlas connection string into .env"
-            )
-        return v.strip()
-
-    @model_validator(mode="after")
-    def warn_missing_optional(self) -> "Settings":
-        if not self.base_webhook_url:
-            logger.warning(
-                "BASE_WEBHOOK_URL is not set. "
-                "Webhook registration will be skipped."
-            )
-        if not self.customer_webhook_secret:
-            logger.warning(
-                "CUSTOMER_WEBHOOK_SECRET is not set. "
-                "Webhook requests will not be validated."
-            )
-        if not self.admin_webhook_secret:
-            logger.warning(
-                "ADMIN_WEBHOOK_SECRET is not set. "
-                "Webhook requests will not be validated."
-            )
-        return self
+    def is_admin(self, telegram_user_id: int) -> bool:
+        """Return True if the given Telegram user ID is an authorised admin."""
+        return telegram_user_id in self.admin_ids
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """
-    Return a cached Settings instance.
-    Call get_settings() everywhere — never instantiate Settings directly.
-    This ensures the .env file is read exactly once.
+    Return a cached Settings singleton.
+
+    Using lru_cache means the .env file is only parsed once per process start.
     """
     return Settings()
+
+
+# Convenience alias used throughout the project.
+settings: Settings = get_settings()

@@ -1,129 +1,124 @@
 """
 app/services/notification_service.py
-======================================
-Sends notifications to admins and customers.
 
-KEY DESIGN: Telegram file_id from one bot CANNOT be used by another bot.
-When a customer uploads a screenshot to the Customer Bot, we:
-  1. Download the file bytes using the Customer Bot's token
-  2. Re-upload it via the Admin Bot to each admin's chat
+Sends Telegram messages to customers and admins.
 
-This avoids permanent file storage while correctly transferring the image.
+Important — File transfer between bots:
+  The Customer Bot and Admin Bot are separate Telegram identities.
+  A file_id received by the Customer Bot CANNOT be directly used by
+  the Admin Bot (Telegram does not allow cross-bot file sharing).
+
+  Strategy implemented here:
+  1. Customer Bot forwards the photo to a temporary message sent to itself.
+  2. The raw file content is forwarded to each admin via the Admin Bot.
+  3. No files are written to local disk permanently.
+  4. The Admin Bot re-uploads the bytes to Telegram (which assigns a new file_id).
 """
-
 from __future__ import annotations
 
 import logging
-from io import BytesIO
+import os
+import tempfile
+from typing import List
 
-import httpx
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.error import TelegramError
 
-from app.config import get_settings
+from app.config import settings
+from app.utils.pricing import format_price
 
 logger = logging.getLogger(__name__)
 
-
-async def _download_file_bytes(customer_bot: Bot, file_id: str) -> bytes | None:
-    """
-    Download a file from Telegram using the Customer Bot.
-    Returns raw bytes or None on failure.
-    """
-    try:
-        tg_file = await customer_bot.get_file(file_id)
-        # tg_file.file_path is a temporary HTTPS URL valid for ~1 hour
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(tg_file.file_path)
-            response.raise_for_status()
-            return response.content
-    except TelegramError as e:
-        logger.error("Failed to get_file from Telegram: %s", e)
-        return None
-    except httpx.HTTPError as e:
-        logger.error("Failed to download file bytes: %s", e)
-        return None
+# ── Callback data prefixes ────────────────────────────────────────────────────
+CB_APPROVE = "approve"
+CB_REJECT = "reject"
 
 
-async def notify_admins_new_order(
-    customer_bot: Bot,
-    admin_bot: Bot,
-    order: dict,
-    customer: dict,
-) -> None:
-    """
-    Send a new pending order notification to all admins.
-    Re-uploads the screenshot from Customer Bot → Admin Bot.
-    """
-    settings = get_settings()
-    admin_ids = settings.admin_telegram_ids
-
-    order_code = order.get("orderCode", "N/A")
-    amount = order.get("amount", 0)
-    quantity = order.get("quantity", 0)
-    payment_method = order.get("paymentMethod", "N/A")
-    file_id = order.get("paymentScreenshotFileId")
-
-    movies_text = "\n".join(
-        f"  {i+1}. {m.get('title', '?')}"
-        for i, m in enumerate(order.get("selectedMovies", []))
-    )
-
-    customer_name = customer.get("firstName", "") + " " + customer.get("lastName", "")
-    customer_name = customer_name.strip() or "Unknown"
-    customer_username = customer.get("username", "")
-    customer_telegram_id = customer.get("telegramId", "")
-
-    from datetime import timezone
-    created_at = order.get("createdAt")
-    created_str = created_at.strftime("%Y-%m-%d %H:%M UTC") if created_at else "N/A"
-
-    text = (
-        f"🔔 <b>New Order — {order_code}</b>\n\n"
-        f"👤 <b>Customer:</b> {customer_name}\n"
-        f"🆔 <b>Username:</b> {'@' + customer_username if customer_username else 'N/A'}\n"
-        f"📟 <b>Telegram ID:</b> <code>{customer_telegram_id}</code>\n\n"
-        f"🎬 <b>ရွေးချယ်ထားသောကားများ ({quantity}):</b>\n{movies_text}\n\n"
-        f"💰 <b>ကျသင့်ငွေ:</b> {amount:,} MMK\n"
-        f"💳 <b>ငွေပေးချေမှု:</b> {payment_method}\n"
-        f"📅 <b>Order Date:</b> {created_str}\n\n"
-        f"📸 Payment Screenshot ကို အောက်တွင် စစ်ဆေးပါ။"
-    )
-
-    keyboard = InlineKeyboardMarkup([
+def _build_approve_reject_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    """Build inline keyboard with Approve / Reject buttons."""
+    return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("✅ Approve", callback_data=f"approve:{order_code}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"reject:{order_code}"),
+            InlineKeyboardButton("✅ Approve", callback_data=f"{CB_APPROVE}:{order_id}"),
+            InlineKeyboardButton("❌ Reject", callback_data=f"{CB_REJECT}:{order_id}"),
         ]
     ])
 
-    # Download screenshot once using customer bot
-    image_bytes: bytes | None = None
-    if file_id:
-        image_bytes = await _download_file_bytes(customer_bot, file_id)
-        if not image_bytes:
-            logger.warning("Could not download screenshot for order %s.", order_code)
 
-    for admin_id in admin_ids:
+def _format_order_notification(order: dict, user: dict) -> str:
+    """Format the admin notification message for a new payment."""
+    movies_text = "\n".join(
+        f"  {i + 1}. {m['title']}"
+        for i, m in enumerate(order.get("selectedMovies", []))
+    )
+    username_display = (
+        f"@{user.get('username')}" if user.get("username") else "(username မရှိပါ)"
+    )
+    first_name = user.get("firstName", "")
+    last_name = user.get("lastName", "")
+    full_name = f"{first_name} {last_name}".strip() or "(နာမည်မရှိပါ)"
+
+    return (
+        f"🔔 *New Payment Received*\n\n"
+        f"Order ID: `{order['orderCode']}`\n"
+        f"Customer: {full_name}\n"
+        f"Username: {username_display}\n"
+        f"Telegram ID: `{order['telegramUserId']}`\n\n"
+        f"Movies:\n{movies_text}\n\n"
+        f"Quantity: {order['quantity']}\n"
+        f"Amount: *{format_price(order['amount'])}*\n"
+        f"Payment Method: {order['paymentMethod']}\n\n"
+        f"Status: WAITING\\_APPROVAL"
+    )
+
+
+async def notify_admins_new_payment(
+    order: dict,
+    user: dict,
+    screenshot_file_id: str,
+    customer_bot: Bot,
+    admin_bot: Bot,
+) -> None:
+    """
+    Notify all admins of a new payment submission.
+
+    Downloads the screenshot via the Customer Bot and re-uploads it
+    via the Admin Bot to avoid cross-bot file ID restrictions.
+    """
+    order_id = str(order["_id"])
+    caption = _format_order_notification(order, user)
+    keyboard = _build_approve_reject_keyboard(order_id)
+
+    # ── Download screenshot from Telegram via Customer Bot ────────────────────
+    photo_bytes: bytes | None = None
+    try:
+        file_obj = await customer_bot.get_file(screenshot_file_id)
+        # Download to an in-memory bytes buffer.
+        photo_bytes = await file_obj.download_as_bytearray()
+    except TelegramError as exc:
+        logger.error("Failed to download screenshot %s: %s", screenshot_file_id, exc)
+
+    # ── Send to each admin via Admin Bot ──────────────────────────────────────
+    for admin_id in settings.admin_ids:
         try:
-            if image_bytes:
+            if photo_bytes:
                 await admin_bot.send_photo(
                     chat_id=admin_id,
-                    photo=BytesIO(image_bytes),
-                    caption=text,
-                    parse_mode="HTML",
+                    photo=bytes(photo_bytes),
+                    caption=caption,
+                    parse_mode="Markdown",
                     reply_markup=keyboard,
                 )
             else:
-                # Screenshot unavailable — send text only
+                # Fallback: send text only if download failed.
                 await admin_bot.send_message(
                     chat_id=admin_id,
-                    text=text + "\n\n⚠️ Screenshot မရရှိနိုင်ပါ။",
-                    parse_mode="HTML",
+                    text=caption + "\n\n⚠️ Screenshot ပေးပို့မှုမအောင်မြင်ပါ။",
+                    parse_mode="Markdown",
                     reply_markup=keyboard,
                 )
-        except TelegramError as e:
-            logger.error("Failed to notify admin %d: %s", admin_id, e)
+            logger.info("Admin %s notified of order %s", admin_id, order["orderCode"])
+        except TelegramError as exc:
+            logger.error("Failed to notify admin %s: %s", admin_id, exc)
 
 
 async def notify_customer_approved(
@@ -131,34 +126,36 @@ async def notify_customer_approved(
     telegram_user_id: int,
     order: dict,
 ) -> None:
-    """Send approval notification with VIP channel links to customer."""
-    order_code = order.get("orderCode", "N/A")
-    selected_movies = order.get("selectedMovies", [])
+    """
+    Notify the customer that their order was approved.
+    Includes inline URL buttons for each purchased channel.
+    """
+    movies = order.get("selectedMovies", [])
+    buttons = [
+        [InlineKeyboardButton(f"🎬 {m['title']}", url=m["channelLink"])]
+        for m in movies
+    ]
+    keyboard = InlineKeyboardMarkup(buttons)
 
     text = (
-        f"✅ <b>Payment အတည်ပြုပြီးပါပြီ။</b>\n\n"
-        f"🎉 Order <b>{order_code}</b> အတွက် ကျေးဇူးတင်ပါသည်။\n\n"
-        f"အောက်ပါ ခလုတ်များကို နှိပ်၍ VIP Channel များသို့ ဝင်ရောက်နိုင်ပါသည်။"
+        f"✅ *Payment အတည်ပြုပြီးပါပြီ။*\n\n"
+        f"Order ID: `{order['orderCode']}`\n\n"
+        f"သင်ဝယ်ယူထားသော VIP Content များကို အောက်ပါ Link များမှ ဝင်ရောက်နိုင်ပါသည်။\n\n"
+        f"⚠️ Link များကို သိမ်းဆည်းထားပါ။ ကာကွယ်ရေးအတွက် အများနှင့် မမျှဝေပါနှင့်။"
     )
-
-    buttons = [
-        [InlineKeyboardButton(
-            f"🎬 {m.get('title', 'Movie')} ဝင်ရန်",
-            url=m.get("channelLink", "#"),
-        )]
-        for m in selected_movies
-        if m.get("channelLink")
-    ]
 
     try:
         await customer_bot.send_message(
             chat_id=telegram_user_id,
             text=text,
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup(buttons) if buttons else None,
+            parse_mode="Markdown",
+            reply_markup=keyboard,
         )
-    except TelegramError as e:
-        logger.error("Failed to notify customer %d of approval: %s", telegram_user_id, e)
+    except TelegramError as exc:
+        logger.error(
+            "Failed to send approval notification to user %s: %s",
+            telegram_user_id, exc,
+        )
 
 
 async def notify_customer_rejected(
@@ -166,22 +163,22 @@ async def notify_customer_rejected(
     telegram_user_id: int,
     order: dict,
 ) -> None:
-    """Send rejection notification with reason to customer."""
-    order_code = order.get("orderCode", "N/A")
-    reason = order.get("rejectionReason", "အကြောင်းရင်း မဖော်ပြပါ။")
-
+    """Notify the customer that their payment was rejected."""
+    reason = order.get("rejectionReason") or "အကြောင်းရင်းမဖော်ပြပါ။"
     text = (
-        f"❌ <b>Payment အတည်ပြု၍မရပါ။</b>\n\n"
-        f"Order: <b>{order_code}</b>\n\n"
-        f"<b>အကြောင်းရင်း:</b>\n{reason}\n\n"
-        f"ပြဿနာရှိပါက Admin ကို ဆက်သွယ်ပါ သို့မဟုတ် ပြန်လည်ကြိုးစားပါ။"
+        f"❌ *Payment အတည်ပြု၍မရပါ။*\n\n"
+        f"Order ID: `{order['orderCode']}`\n\n"
+        f"အကြောင်းရင်း:\n{reason}\n\n"
+        f"ပြန်လည်ကြိုးစားရန် /start ကိုနှိပ်ပါ။"
     )
-
     try:
         await customer_bot.send_message(
             chat_id=telegram_user_id,
             text=text,
-            parse_mode="HTML",
+            parse_mode="Markdown",
         )
-    except TelegramError as e:
-        logger.error("Failed to notify customer %d of rejection: %s", telegram_user_id, e)
+    except TelegramError as exc:
+        logger.error(
+            "Failed to send rejection notification to user %s: %s",
+            telegram_user_id, exc,
+        )
