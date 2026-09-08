@@ -39,8 +39,10 @@ class BotType:
 class PaymentMethod:
     KPAY = "KPay"
     WAVE = "Wave"
+    AYAPAY = "AYAPay"
+    UABPAY = "UABPay"
 
-    ALL = (KPAY, WAVE)
+    ALL = (KPAY, WAVE, AYAPAY, UABPAY)
 
 
 # ── Collection names ──────────────────────────────────────────────────────────

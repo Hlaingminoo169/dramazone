@@ -3,25 +3,12 @@ main.py
 
 DramaZone VIP Bot — FastAPI application entry point.
 
-Steps implemented:
-  1  — MongoDB connection + indexes
-  2  — Project structure
-  3  — GET / and GET /health
-  4  — POST /webhook/customer and /webhook/admin (with secret validation)
-  5  — Database schema (via indexes + services)
-  6  — Customer /start
-  7  — Package selection
-  8  — Myanmar number input
-  9  — Movie selection
-  10 — Payment method
-  11 — Order creation + screenshot
-  12 — Admin bot
-  13 — Admin payment notification
-  14 — Approve order
-  15 — Reject order + reason
-  16 — Order history
-  17 — Contact admin
-  18 — Security (webhook secrets, admin auth, atomic ops)
+Security layers implemented:
+  HTTP layer  — Rate limiting (IP sliding window), security headers,
+                request-size cap, webhook secret validation
+  Bot layer   — Per-user anti-flood protection (see app/utils/anti_flood.py)
+  DB layer    — Atomic status transitions (approve/reject)
+  Auth layer  — Admin-only handlers, Telegram ID allowlist
 """
 from __future__ import annotations
 
@@ -32,19 +19,28 @@ from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, status
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from telegram import Update
 
 from app.config import settings
 from app.database.mongodb import connect as db_connect, close as db_close
 from app.database.indexes import ensure_indexes
+from app.middleware.rate_limiter import RateLimitMiddleware
+from app.middleware.security_headers import SecurityHeadersMiddleware
 
-# ── Logging ──────────────────────────────────────────────────────────────────
+# ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     stream=sys.stdout,
 )
 logger = logging.getLogger("dramazone")
+
+# ── Constants ─────────────────────────────────────────────────────────────────
+# Maximum allowed request body size (bytes).  Telegram updates are small JSON;
+# screenshots are never sent to our webhook (only file_ids are).
+# 512 KB is more than enough for any legitimate Telegram update.
+MAX_REQUEST_BODY_BYTES = 512 * 1024   # 512 KB
 
 
 # ── Application lifespan ─────────────────────────────────────────────────────
@@ -75,6 +71,20 @@ async def lifespan(app: FastAPI):
         admin_app = get_admin_app()
         await admin_app.initialize()
 
+    # Schedule anti-flood cleanup every 5 minutes via bot job_queue
+    if settings.customer_bot_token:
+        from app.bots.customer_bot import get_customer_app
+        from app.utils.anti_flood import cleanup_stale_windows
+
+        async def _flood_cleanup(ctx):
+            removed = cleanup_stale_windows(older_than=300)
+            if removed:
+                logger.debug("Anti-flood cleanup: removed %d stale entries.", removed)
+
+        capp = get_customer_app()
+        if capp.job_queue:
+            capp.job_queue.run_repeating(_flood_cleanup, interval=300, first=300)
+
     logger.info("DramaZone VIP is ready.")
 
     yield  # ← application running
@@ -90,25 +100,68 @@ app = FastAPI(
     title="DramaZone VIP Bot API",
     description="Telegram VIP content purchasing system",
     version="0.1.0",
+    # Never expose docs in production — set DOCS_ENABLED=true only locally
     docs_url="/docs" if os.getenv("DOCS_ENABLED", "false").lower() == "true" else None,
     redoc_url=None,
     lifespan=lifespan,
 )
+
+# ── Security Middleware (order matters — outermost runs first) ─────────────────
+#
+# Stack (request flow):
+#   Client → RateLimitMiddleware → SecurityHeadersMiddleware → Routes
+#
+# RateLimitMiddleware must be outermost so blocked requests never reach routes.
+# SecurityHeadersMiddleware wraps all responses (including rate-limit 429s).
+
+app.add_middleware(RateLimitMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
+
+
+# ── Request body size guard ───────────────────────────────────────────────────
+@app.middleware("http")
+async def limit_request_size(request: Request, call_next):
+    """
+    Reject oversized request bodies before they are read into memory.
+
+    This prevents memory-exhaustion attacks via huge POST bodies.
+    Telegram webhook payloads are always small JSON; 512 KB is generous.
+    """
+    content_length = request.headers.get("Content-Length")
+    if content_length:
+        try:
+            if int(content_length) > MAX_REQUEST_BODY_BYTES:
+                logger.warning(
+                    "SECURITY: Oversized request (%s bytes) from %s rejected.",
+                    content_length,
+                    request.client.host if request.client else "unknown",
+                )
+                return HTTPException(
+                    status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                    detail="Request body too large.",
+                )
+        except ValueError:
+            pass
+    return await call_next(request)
 
 
 # ── Webhook secret validation ─────────────────────────────────────────────────
 def _validate_webhook_secret(request: Request, expected_secret: str) -> None:
     """
     Validate X-Telegram-Bot-Api-Secret-Token header.
+
     Raises HTTP 403 on mismatch — never reveals the expected secret.
+    Timing-safe comparison prevents timing-oracle attacks.
     """
     if not expected_secret:
-        return  # Secret not configured — dev mode only
+        return  # Secret not configured — dev/polling mode only
 
+    import hmac
     received = request.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    if received != expected_secret:
+    # hmac.compare_digest is constant-time regardless of string length
+    if not hmac.compare_digest(received, expected_secret):
         logger.warning(
-            "Webhook secret mismatch on %s from %s",
+            "SECURITY: Webhook secret mismatch on %s from %s",
             request.url.path,
             request.client.host if request.client else "unknown",
         )
@@ -134,7 +187,7 @@ async def customer_webhook(request: Request):
 
     try:
         from app.bots.customer_bot import get_customer_app
-        data = await request.json()
+        data   = await request.json()
         update = Update.de_json(data, get_customer_app().bot)
         await get_customer_app().process_update(update)
     except Exception as exc:
@@ -151,7 +204,7 @@ async def admin_webhook(request: Request):
 
     try:
         from app.bots.admin_bot import get_admin_app
-        data = await request.json()
+        data   = await request.json()
         update = Update.de_json(data, get_admin_app().bot)
         await get_admin_app().process_update(update)
     except Exception as exc:
@@ -169,4 +222,9 @@ if __name__ == "__main__":
         port=port,
         reload=False,
         log_level="info",
+        # Limit the number of concurrent connections (DDoS protection)
+        limit_concurrency=100,
+        limit_max_requests=10_000,
+        # Timeout for slow clients (slow-loris attack mitigation)
+        timeout_keep_alive=5,
     )

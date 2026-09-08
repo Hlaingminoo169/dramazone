@@ -15,6 +15,7 @@ dependencies = [
     "pymongo[srv]>=4.8.0",
     "pydantic-settings>=2.3.0",
     "python-dotenv>=1.0.0",
+    "slowapi>=0.1.9",
 ]
 
 [tool.setuptools.packages.find]

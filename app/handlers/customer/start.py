@@ -16,6 +16,7 @@ from telegram.ext import CommandHandler, ContextTypes, Application
 from app.services.user_service import upsert_user
 from app.services.session_service import clear_session
 from app.types import BotType
+from app.utils.anti_flood import check_flood
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /start — upsert user, clear stale session, show main menu."""
     tg_user = update.effective_user
     if tg_user is None:
+        return
+
+    # Flood protection
+    if await check_flood(update, context):
         return
 
     # Save / update user profile.

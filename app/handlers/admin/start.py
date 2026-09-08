@@ -20,9 +20,8 @@ logger = logging.getLogger(__name__)
 
 ADMIN_MENU_KEYBOARD = ReplyKeyboardMarkup(
     [
-        [KeyboardButton("🔔 Pending Orders")],
-        [KeyboardButton("📦 All Orders")],
-        [KeyboardButton("📊 Statistics")],
+        [KeyboardButton("🔔 Pending Orders"), KeyboardButton("📦 All Orders")],
+        [KeyboardButton("📊 Statistics"), KeyboardButton("📋 Audit Log")],
     ],
     resize_keyboard=True,
 )

@@ -55,8 +55,19 @@ def format_admin_order_notification(
     Format the admin notification message for an order status.
 
     Includes customer profile link, telegram username, and (when processed)
-    which admin approved/rejected the payment.
+    which admin approved/rejected the payment along with the action timestamp.
     """
+    from datetime import datetime, timezone, timedelta
+
+    def _fmt_mmt(dt) -> str:
+        """Convert UTC datetime to Myanmar Time (UTC+6:30) string."""
+        if not dt:
+            return "—"
+        if isinstance(dt, datetime) and dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        mmt = dt + timedelta(hours=6, minutes=30)
+        return mmt.strftime("%Y-%m-%d %H:%M (MMT)")
+
     movies_text = "\n".join(
         f"  {i + 1}. {m['title']}"
         for i, m in enumerate(order.get("selectedMovies", []))
@@ -68,6 +79,8 @@ def format_admin_order_notification(
     full_name = f"{first_name} {last_name}".strip() or "(နာမည်မရှိပါ)"
     clean_name = full_name.replace("[", "(").replace("]", ")")
     tg_id = order.get("telegramUserId")
+
+    created_str = _fmt_mmt(order.get("createdAt"))
 
     if status == "APPROVED":
         header = "✅ *Payment Approved*"
@@ -88,18 +101,23 @@ def format_admin_order_notification(
         f"Movies:\n{movies_text}\n",
         f"Quantity: {order['quantity']}",
         f"Amount: *{format_price(order['amount'])}*",
-        f"Payment Method: {order['paymentMethod']}\n",
+        f"Payment Method: {order['paymentMethod']}",
+        f"Order Date: {created_str}\n",
         f"Status: {status_str}",
     ]
 
     if admin_display:
         if status == "APPROVED":
-            lines.append(f"Approved by: {admin_display}")
+            action_time = _fmt_mmt(order.get("approvedAt"))
+            lines.append(f"✅ Approved by: {admin_display}")
+            lines.append(f"🕐 Approved at: {action_time}")
         elif status == "REJECTED":
-            lines.append(f"Rejected by: {admin_display}")
+            action_time = _fmt_mmt(order.get("rejectedAt"))
+            lines.append(f"❌ Rejected by: {admin_display}")
+            lines.append(f"🕐 Rejected at: {action_time}")
 
     if rejection_reason and status == "REJECTED":
-        lines.append(f"Reason: {rejection_reason}")
+        lines.append(f"📝 Reason: {rejection_reason}")
 
     return "\n".join(lines)
 

@@ -30,42 +30,48 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ── Telegram ─────────────────────────────────────────────────────────────
+    # -- Telegram ---------------------------------------------------------------
     customer_bot_token: str = ""
     admin_bot_token: str = ""
 
-    # ── MongoDB ───────────────────────────────────────────────────────────────
+    # -- MongoDB ----------------------------------------------------------------
     mongodb_uri: str = ""
     mongodb_db_name: str = "dramazone_vip"
 
-    # ── Admins ────────────────────────────────────────────────────────────────
+    # -- Admins ----------------------------------------------------------------
     # Stored as comma-separated string in env; parsed to a list of ints.
     admin_telegram_ids: str = "1673861706,1655754454"
     admin_username: str = "myatnyein21"
 
-    # ── Payment ───────────────────────────────────────────────────────────────
+    # -- Payment account details -----------------------------------------------
     kpay_phone: str = ""
     kpay_account_name: str = ""
     wave_phone: str = ""
     wave_account_name: str = ""
+    ayapay_phone: str = ""
+    ayapay_account_name: str = ""
+    uabpay_phone: str = ""
+    uabpay_account_name: str = ""
 
-    # ── QR codes (optional Telegram file IDs) ────────────────────────────────
+    # -- QR codes (optional Telegram file IDs) ---------------------------------
     qr_kpay_file_id: str = ""
     qr_wave_file_id: str = ""
+    qr_ayapay_file_id: str = ""
+    qr_uabpay_file_id: str = ""
 
-    # ── Webhook ───────────────────────────────────────────────────────────────
+    # -- Webhook ----------------------------------------------------------------
     customer_webhook_secret: str = ""
     admin_webhook_secret: str = ""
     webhook_base_url: str = ""
 
-    # ── Deployment mode ───────────────────────────────────────────────────────
+    # -- Deployment mode -------------------------------------------------------
     # 'polling' for local dev, 'webhook' for production
     bot_mode: str = "polling"
 
-    # ── Application port (injected by hosting platforms) ─────────────────────
+    # -- Application port (injected by hosting platforms) ----------------------
     port: int = 8000
 
-    # ── Computed helpers ──────────────────────────────────────────────────────
+    # -- Computed helpers ------------------------------------------------------
     @property
     def admin_ids(self) -> List[int]:
         """Parsed list of admin Telegram user IDs."""

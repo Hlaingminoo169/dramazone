@@ -230,6 +230,30 @@ def get_all_orders(limit: int = 20, skip: int = 0) -> List[dict]:
     )
 
 
+def count_all_orders() -> int:
+    """Return total count of all orders (used for pagination)."""
+    col = get_collection(Collection.ORDERS)
+    return col.count_documents({})
+
+
+def get_audit_log(limit: int = 20, skip: int = 0) -> List[dict]:
+    """
+    Return recently processed orders (APPROVED or REJECTED) for auditing.
+
+    Each document includes approvedBy/rejectedBy admin Telegram IDs and timestamps,
+    making it suitable for accounting reconciliation.
+    """
+    col = get_collection(Collection.ORDERS)
+    return list(
+        col.find(
+            {"status": {"$in": [OrderStatus.APPROVED, OrderStatus.REJECTED]}}
+        )
+        .sort("updatedAt", -1)
+        .skip(skip)
+        .limit(limit)
+    )
+
+
 def get_statistics() -> Dict[str, Any]:
     """Return basic order statistics for the admin dashboard."""
     col = get_collection(Collection.ORDERS)

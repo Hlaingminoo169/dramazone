@@ -4,3 +4,4 @@ python-telegram-bot>=21.0
 pymongo[srv]>=4.8.0
 pydantic-settings>=2.3.0
 python-dotenv>=1.0.0
+slowapi>=0.1.9
