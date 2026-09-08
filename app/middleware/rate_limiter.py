@@ -192,8 +192,9 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         path    = request.url.path
         is_hook = path.startswith("/webhook/")
 
-        # Telegram servers are always allowed on webhook paths.
-        if is_hook and _is_telegram_ip(ip):
+        # Webhook endpoints are protected by X-Telegram-Bot-Api-Secret-Token in main.py.
+        # Bypassing IP check here prevents blocking Telegram when behind proxies without proper X-Forwarded-For.
+        if is_hook:
             return await call_next(request)
 
         # --- Global rate limit ---

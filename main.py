@@ -65,11 +65,13 @@ async def lifespan(app: FastAPI):
         from app.bots.customer_bot import get_customer_app
         customer_app = get_customer_app()
         await customer_app.initialize()
+        await customer_app.start()
 
     if settings.admin_bot_token:
         from app.bots.admin_bot import get_admin_app
         admin_app = get_admin_app()
         await admin_app.initialize()
+        await admin_app.start()
 
     # Schedule anti-flood cleanup every 5 minutes via bot job_queue
     if settings.customer_bot_token:
@@ -91,6 +93,17 @@ async def lifespan(app: FastAPI):
 
     # Shutdown
     logger.info("DramaZone VIP shutting down…")
+    
+    if settings.customer_bot_token:
+        from app.bots.customer_bot import get_customer_app
+        await get_customer_app().stop()
+        await get_customer_app().shutdown()
+        
+    if settings.admin_bot_token:
+        from app.bots.admin_bot import get_admin_app
+        await get_admin_app().stop()
+        await get_admin_app().shutdown()
+        
     db_close()
     logger.info("Goodbye.")
 
@@ -180,8 +193,10 @@ async def health():
     return {"status": "ok"}
 
 
+from fastapi import BackgroundTasks
+
 @app.post("/webhook/customer", include_in_schema=False)
-async def customer_webhook(request: Request):
+async def customer_webhook(request: Request, background_tasks: BackgroundTasks):
     """Receive and process Customer Bot Telegram updates."""
     _validate_webhook_secret(request, settings.customer_webhook_secret)
 
@@ -189,7 +204,9 @@ async def customer_webhook(request: Request):
         from app.bots.customer_bot import get_customer_app
         data   = await request.json()
         update = Update.de_json(data, get_customer_app().bot)
-        await get_customer_app().process_update(update)
+        # Process the update in the background so we return 200 OK immediately
+        # This prevents Telegram from timing out and retrying the delivery
+        background_tasks.add_task(get_customer_app().process_update, update)
     except Exception as exc:
         # Always return 200 — Telegram retries on non-200.
         logger.exception("Error processing customer update: %s", type(exc).__name__)
@@ -198,7 +215,7 @@ async def customer_webhook(request: Request):
 
 
 @app.post("/webhook/admin", include_in_schema=False)
-async def admin_webhook(request: Request):
+async def admin_webhook(request: Request, background_tasks: BackgroundTasks):
     """Receive and process Admin Bot Telegram updates."""
     _validate_webhook_secret(request, settings.admin_webhook_secret)
 
@@ -206,7 +223,7 @@ async def admin_webhook(request: Request):
         from app.bots.admin_bot import get_admin_app
         data   = await request.json()
         update = Update.de_json(data, get_admin_app().bot)
-        await get_admin_app().process_update(update)
+        background_tasks.add_task(get_admin_app().process_update, update)
     except Exception as exc:
         logger.exception("Error processing admin update: %s", type(exc).__name__)
 
