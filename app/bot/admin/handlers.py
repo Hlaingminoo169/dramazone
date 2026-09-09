@@ -72,13 +72,13 @@ async def pending_orders_handler(update: Update, context: ContextTypes.DEFAULT_T
 
     for order in orders:
         movies = await movie_service.get_movies_by_ids(order.movieIds)
-        movie_titles = "\n".join([f"• {m.titleMM or m.titleEn}" for m in movies])
+        movie_titles = "\n".join([f"• {m.title or m.titleEn}" for m in movies])
 
         caption = (
             f"📦 **Order Code: #{order.orderCode}**\n"
             f"• Telegram ID: `{order.telegramId}`\n"
             f"• ဇာတ်ကား အရေအတွက်: **{order.packageSize} ကား**\n"
-            f"• ကျသင့်ငွေ: **{order.totalPrice:,} MMK** ({order.paymentMethod.upper() if order.paymentMethod else 'N/A'})\n\n"
+            f"• ကျသင့်ငွေ: **{order.totalAmount:,} MMK** ({order.paymentMethod.upper() if order.paymentMethod else 'N/A'})\n\n"
             f"🎬 **ရွေးချယ်ထားသော ဇာတ်ကားများ:**\n{movie_titles}\n"
         )
 
@@ -114,7 +114,7 @@ async def movies_list_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     text = "🎬 **လက်ရှိ Active ဖြစ်နေသော ဇာတ်ကားများ List**\n\n"
     for idx, m in enumerate(movies, 1):
-        text += f"{idx}. **{m.titleMM or m.titleEn}**\n   Link: `{m.watchLink or 'N/A'}`\n\n"
+        text += f"{idx}. **{m.title or m.titleEn}**\n   Link: `{m.watchLink or 'N/A'}`\n\n"
 
     await update.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
 
@@ -145,14 +145,14 @@ async def admin_approve_callback(update: Update, context: ContextTypes.DEFAULT_T
     updated_caption = (
         f"✅ **Order #{order_code} အား အတည်ပြုပြီးပါပြီ (APPROVED)**\n\n"
         f"• စစ်ဆေးခဲ့သူ Admin: **{admin_name}**\n"
-        f"• Customer Telegram ID: `{order.telegramId}`\n"
-        f"• ပက်ကေ့ဂျ်: **{order.packageSize} ကား** ({order.totalPrice:,} MMK)\n"
+        f"• Customer Telegram ID: `{order.telegramUserId}`\n"
+        f"• ပက်ကေ့ဂျ်: **{order.packageSize} ကား** ({order.totalAmount:,} MMK)\n"
         f"• Watch Links များကို Customer ထံသို့ ပေးပို့ပြီးပါပြီ။"
     )
 
-    if query.message.photo:
+    if getattr(query.message, 'photo', None):
         await query.edit_message_caption(updated_caption, parse_mode="Markdown", reply_markup=None)
-    else:
+    elif hasattr(query, "edit_message_text"):
         await query.edit_message_text(updated_caption, parse_mode="Markdown", reply_markup=None)
 
 
@@ -215,14 +215,15 @@ async def admin_reject_reason_callback(update: Update, context: ContextTypes.DEF
         f"❌ **Order #{order_code} အား ငြင်းပယ်ပြီးပါပြီ (REJECTED)**\n\n"
         f"• ငြင်းပယ်ခဲ့သူ Admin: **{admin_name}**\n"
         f"• အကြောင်းအရင်း: **{reason_str}**\n"
-        f"• Customer Telegram ID: `{order.telegramId}`\n"
+        f"• Customer Telegram ID: `{order.telegramUserId}`\n"
         f"• Rejection notification အား Customer ထံ ပေးပို့ပြီးပါပြီ။"
     )
 
-    if query.message.photo:
+    if query.message and getattr(query.message, 'photo', None):
         await query.edit_message_caption(updated_caption, parse_mode="Markdown", reply_markup=None)
     else:
-        await query.edit_message_text(updated_caption, parse_mode="Markdown", reply_markup=None)
+        if hasattr(query, "edit_message_text"):
+            await query.edit_message_text(updated_caption, parse_mode="Markdown", reply_markup=None)
 
 
 @admin_only

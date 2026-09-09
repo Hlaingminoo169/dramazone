@@ -36,6 +36,7 @@ try:
     from pythonjsonlogger import jsonlogger  # type: ignore[import-untyped]
     _JSON_AVAILABLE = True
 except ImportError:
+    jsonlogger = None  # type: ignore
     _JSON_AVAILABLE = False
 
 
@@ -120,7 +121,7 @@ def setup_logging(level: str = "INFO", *, use_json: bool | None = None) -> None:
         use_json = not sys.stdout.isatty()
 
     if use_json and _JSON_AVAILABLE:
-        formatter: logging.Formatter = jsonlogger.JsonFormatter(
+        formatter: logging.Formatter = jsonlogger.JsonFormatter(  # type: ignore
             fmt="%(asctime)s %(levelname)s %(name)s %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%SZ",
         )

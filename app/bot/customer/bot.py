@@ -20,7 +20,8 @@ from telegram.ext import (
     filters
 )
 
-from app.config import config
+from app.config import get_settings
+config = get_settings()
 from app.bot.customer import handlers
 
 logger = logging.getLogger("dramazone.bot.customer")
@@ -80,8 +81,7 @@ async def init_customer_bot() -> None:
         )
     elif bot_mode == "polling":
         logger.info("Starting Customer Bot in POLLING mode for local development...")
-        # Start updater task in background for polling
-        asyncio.create_task(customer_bot_app.updater.start_polling())
+        await customer_bot_app.updater.start_polling()
     else:
         logger.info(f"Customer bot mode set to '{bot_mode}'. Webhook not automatically set.")
 

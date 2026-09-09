@@ -1,6 +1,6 @@
 """
 tests/test_admin_service.py
-────────────────────────────────────────────────────────────────────────
+------------------------------------------------------------------------
 Unit tests for Admin Service and order approval/rejection workflows.
 """
 
@@ -10,7 +10,8 @@ from datetime import datetime
 from app.models.order import OrderStatus
 from app.services.admin_service import admin_service
 from app.services.order_service import order_service
-from app.config import config
+from app.config import get_settings
+config = get_settings()
 
 
 @pytest.mark.asyncio
@@ -52,6 +53,7 @@ async def test_admin_stats_and_order_flow(clean_db):
         admin_username="test_admin"
     )
     assert ok is True
+    assert approved_order is not None
     assert approved_order.status == OrderStatus.APPROVED
 
     # 5. Verify stats updated

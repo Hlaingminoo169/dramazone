@@ -43,7 +43,7 @@ class NotifierService:
             logger.warning("No ADMIN_TELEGRAM_IDS configured in environment.")
             return
 
-        movie_titles = "\n".join([f"• {m.titleMM or m.titleEn}" for m in selected_movies])
+        movie_titles = "\n".join([f"• {m.title or m.titleEn}" for m in selected_movies])
         username_str = f"@{user_info.get('username')}" if user_info.get('username') else "မရှိပါ"
         name_str = f"{user_info.get('first_name', '')} {user_info.get('last_name', '')}".strip()
 
@@ -51,9 +51,9 @@ class NotifierService:
             f"🔔 **အော်ဒါအသစ် ရောက်ရှိပါသည်!**\n\n"
             f"• Order Code: **#{order.orderCode}**\n"
             f"• Customer: **{name_str}** ({username_str})\n"
-            f"• Telegram ID: `{order.telegramId}`\n"
+            f"• Telegram ID: `{order.telegramUserId}`\n"
             f"• ဇာတ်ကား အရေအတွက်: **{order.packageSize} ကား**\n"
-            f"• ကျသင့်ငွေ: **{order.totalPrice:,} MMK**\n"
+            f"• ကျသင့်ငွေ: **{order.totalAmount:,} MMK**\n"
             f"• Payment Method: **{(order.paymentMethod or 'N/A').upper()}**\n\n"
             f"🎬 **ရွေးချယ်ထားသော ဇာတ်ကားများ:**\n{movie_titles}\n\n"
             f"ကျေးဇူးပြု၍ ငွေလွှဲပြေစာကို စစ်ဆေး၍ အောက်ပါ Button များကို နှိပ်ပါ။"
@@ -95,7 +95,7 @@ class NotifierService:
 
         links_text = ""
         for idx, m in enumerate(movies, 1):
-            title = m.titleMM or m.titleEn
+            title = m.title or m.titleEn
             link = m.watchLink or "Link ဖြည့်သွင်းထားခြင်း မရှိပါ"
             links_text += f"{idx}. **{title}**\n👉 [ဇာတ်ကား ကြည့်ရန် နှိပ်ပါ]({link})\n\n"
 
@@ -110,15 +110,15 @@ class NotifierService:
 
         try:
             await customer_bot_app.bot.send_message(
-                chat_id=order.telegramId,
+                chat_id=order.telegramUserId,
                 text=text,
                 parse_mode="Markdown",
                 disable_web_page_preview=True
             )
-            logger.info(f"Sent approval notification & links for order #{order.orderCode} to customer {order.telegramId}")
+            logger.info(f"Sent approval notification & links for order #{order.orderCode} to customer {order.telegramUserId}")
             return True
         except Exception as e:
-            logger.error(f"Failed to notify customer {order.telegramId} of approval: {str(e)}")
+            logger.error(f"Failed to notify customer {order.telegramUserId} of approval: {str(e)}")
             return False
 
     async def notify_customer_order_rejected(
@@ -143,14 +143,14 @@ class NotifierService:
 
         try:
             await customer_bot_app.bot.send_message(
-                chat_id=order.telegramId,
+                chat_id=order.telegramUserId,
                 text=text,
                 parse_mode="Markdown"
             )
-            logger.info(f"Sent rejection notification for order #{order.orderCode} to customer {order.telegramId}")
+            logger.info(f"Sent rejection notification for order #{order.orderCode} to customer {order.telegramUserId}")
             return True
         except Exception as e:
-            logger.error(f"Failed to notify customer {order.telegramId} of rejection: {str(e)}")
+            logger.error(f"Failed to notify customer {order.telegramUserId} of rejection: {str(e)}")
             return False
 
 

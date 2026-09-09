@@ -15,12 +15,14 @@ from datetime import datetime, time
 from typing import Dict, Any, Optional, Tuple, List
 import pytz
 
-from app.config import config
+from app.config import get_settings
 from app.database.connection import get_db
 from app.models.order import Order, OrderStatus
+from app.services.order_service import order_service
 from app.services.movie_service import movie_service
 from app.services.notifier import notifier_service
 
+config = get_settings()
 logger = logging.getLogger("dramazone.services.admin")
 
 
@@ -153,7 +155,7 @@ class AdminService:
 
         # Increment user total orders count
         await users_col.update_one(
-            {"telegramId": order.telegramId},
+            {"telegramId": order.telegramUserId},
             {"$inc": {"totalOrders": 1}}
         )
 

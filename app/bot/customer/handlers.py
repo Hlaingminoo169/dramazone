@@ -23,13 +23,15 @@ from typing import List, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
-from app.config import config
+from app.config import get_settings
 from app.models.session import SessionState
 from app.services.session_service import session_service
 from app.services.user_service import user_service
 from app.services.movie_service import movie_service
 from app.services.order_service import order_service
 from app.services.rate_limit_service import rate_limit_service
+
+config = get_settings()
 from app.bot.customer import messages
 
 logger = logging.getLogger("dramazone.bot.customer")
@@ -91,7 +93,7 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_text(
-        messages.WELCOME_MESSAGE,
+        messages.WELCOME,
         reply_markup=reply_markup
     )
 
@@ -120,7 +122,7 @@ async def orders_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     text = "📋 **သင်၏ Order များ**\n\n"
     keyboard = []
     for order in orders:
-        status_str = messages.ORDER_STATUS_MAP.get(order.status, order.status.value)
+        status_str = messages.STATUS_LABELS.get(order.status, order.status.value)
         text += f"• Order #{order.orderCode} — {status_str} ({order.totalPrice:,} MMK)\n"
         keyboard.append([InlineKeyboardButton(f"Order #{order.orderCode} အသေးစိတ်ကြည့်ရန်", callback_data=f"order_detail:{order.orderCode}")])
 
@@ -144,7 +146,7 @@ async def cancel_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
     await session_service.clear_session(user.id)
-    await update.message.reply_text(messages.SESSION_CANCELLED)
+    await update.message.reply_text(messages.ORDER_CANCELLED)
 
 
 async def package_select_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -231,7 +233,8 @@ async def movie_toggle_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     user = update.effective_user
-    movie_id = query.data.split(":")[1]
+    data = query.data or ""
+    movie_id = data.split(":")[1] if ":" in data else ""
 
     session = await session_service.get_session(user.id)
     if not session or session.state != SessionState.SELECTING_PACKAGE:
@@ -342,7 +345,8 @@ async def payment_method_callback(update: Update, context: ContextTypes.DEFAULT_
         return
 
     user = update.effective_user
-    pay_method = query.data.split(":")[1].lower()
+    data = query.data or ""
+    pay_method = data.split(":")[1].lower() if ":" in data else ""
 
     session = await session_service.get_session(user.id)
     if not session or not session.activeOrderId or session.state != SessionState.SELECTING_PAYMENT:
@@ -360,22 +364,23 @@ async def payment_method_callback(update: Update, context: ContextTypes.DEFAULT_
 
     await session_service.set_state(
         telegram_id=user.id,
-        state=SessionState.AWAITING_PAYMENT_PROOF,
+        state=SessionState.AWAITING_SCREENSHOT,
         package_size=session.packageSize,
         selected_movie_ids=session.selectedMovieIds,
         active_order_id=session.activeOrderId
     )
 
     # Get payment account info
-    pay_info = messages.get_payment_info(pay_method)
+    pay_info = config.payment_methods.get(pay_method, {})
+    account_name = pay_info.get("account_name", "")
+    phone = pay_info.get("phone", "")
     
-    pay_instructions = (
-        f"💳 **ငွေလွှဲရန် အချက်အလက်များ**\n\n"
-        f"• Payment Method: **{pay_info['name']}**\n"
-        f"• Account Name: `{pay_info['account_name']}`\n"
-        f"• Phone Number: `{pay_info['phone']}`\n"
-        f"• ကျသင့်ငွေ: **{order.totalPrice:,} MMK**\n\n"
-        f"⚠️ **အရေးကြီးပါသည်:** ငွေလွှဲပြီးပါက **ငွေလွှဲပြေစာ (Screenshot)** ကို ဤ Bot သို့ **ဓါတ်ပုံအဖြစ်** ပေးပို့ပေးပါရန်။"
+    pay_instructions = messages.payment_instructions(
+        method_name=pay_info.get("name", pay_method.upper()),
+        account_name=account_name,
+        phone=phone,
+        amount=order.totalPrice,
+        order_code=order.orderCode
     )
 
     keyboard = [[InlineKeyboardButton("❌ အော်ဒါ မလုပ်တော့ပါ", callback_data="cancel_order")]]
@@ -394,7 +399,7 @@ async def photo_message_handler(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     session = await session_service.get_session(user.id)
-    if not session or not session.activeOrderId or session.state != SessionState.AWAITING_PAYMENT_PROOF:
+    if not session or not session.activeOrderId or session.state != SessionState.AWAITING_SCREENSHOT:
         await update.message.reply_text("ℹ️ လတ်တလော ငွေလွှဲပြေစာ ပေးပို့ရန် Order မရှိပါ။ ဇာတ်ကားဝယ်ယူရန် /start ကို နှိပ်ပါ။")
         return
 
@@ -464,7 +469,8 @@ async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
         )
 
     await session_service.clear_session(user.id)
-    await query.edit_message_text(messages.SESSION_CANCELLED)
+    if hasattr(query, "edit_message_text"):
+        await query.edit_message_text(messages.ORDER_CANCELLED)
 
 
 async def order_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -474,14 +480,15 @@ async def order_detail_callback(update: Update, context: ContextTypes.DEFAULT_TY
         return
     await query.answer()
 
-    order_code = query.data.split(":")[1]
+    data = query.data or ""
+    order_code = data.split(":")[1] if ":" in data else ""
     order = await order_service.get_order_by_code(order_code)
 
-    if not order or order.telegramId != update.effective_user.id:
+    if not order or order.telegramUserId != update.effective_user.id:
         await query.answer("Order ရှာမတွေ့ပါ သို့မဟုတ် ကြည့်ရှုခွင့် မရှိပါ။", show_alert=True)
         return
 
-    status_str = messages.ORDER_STATUS_MAP.get(order.status, order.status.value)
+    status_str = messages.STATUS_LABELS.get(order.status.value, order.status.value)
     
     text = (
         f"📋 **Order #{order.orderCode} အသေးစိတ်**\n\n"
@@ -500,4 +507,5 @@ async def order_detail_callback(update: Update, context: ContextTypes.DEFAULT_TY
             link = m.watchLink or "Link ဖြည့်သွင်းထားခြင်း မရှိပါ"
             text += f"{idx}. {title}\n👉 [ကြည့်ရန် နှိပ်ပါ]({link})\n\n"
 
-    await query.message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
+    if update.effective_message:
+        await update.effective_message.reply_text(text, parse_mode="Markdown", disable_web_page_preview=True)
