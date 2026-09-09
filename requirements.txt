@@ -1,7 +1,28 @@
-fastapi[standard]>=0.115.0
+# ──────────────────────────────────────────────
+# DramaZone VIP Telegram Bot — Requirements
+# ──────────────────────────────────────────────
+
+# Web framework
+fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
-python-telegram-bot>=21.0
-pymongo[srv]>=4.8.0
+
+# MongoDB async driver (Motor wraps PyMongo)
+motor>=3.5.0
+pymongo>=4.8.0
+
+# Settings & validation
+pydantic>=2.7.0
 pydantic-settings>=2.3.0
 python-dotenv>=1.0.0
-slowapi>=0.1.9
+
+# Timezone support (req #37 — Asia/Yangon reporting)
+pytz>=2024.1
+
+# Telegram Bot
+python-telegram-bot[webhooks]>=21.0
+
+# HTTP client (for future Telegram API calls)
+httpx>=0.27.0
+
+# Logging (structured JSON)
+python-json-logger>=2.0.7

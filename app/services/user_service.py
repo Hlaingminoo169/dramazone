@@ -1,54 +1,49 @@
 """
 app/services/user_service.py
+─────────────────────────────────────────────────────────────────────────────
+Customer user profile service.
 
-Customer user management.
-
-Upserts user profile on every /start interaction.
+Upserts a Telegram user profile on every interaction.
+Only stores fields required for order verification and admin search (req #35).
 """
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
 
-from pymongo import ReturnDocument
+from motor.motor_asyncio import AsyncIOMotorDatabase
 from telegram import User as TelegramUser
 
-from app.database.mongodb import get_collection
-from app.types import Collection
+from app.database.collections import USERS
 
 logger = logging.getLogger(__name__)
 
 
-def upsert_user(tg_user: TelegramUser) -> dict:
+async def upsert_user(db: AsyncIOMotorDatabase, telegram_user: TelegramUser) -> dict:
     """
-    Create or update a user document from a Telegram User object.
+    Create or update a customer profile.
 
-    Always updates `updatedAt`. Sets `createdAt` only on first insert.
+    - On first visit: inserts with firstSeenAt, totalOrders=0
+    - On subsequent visits: updates username/name/lastSeenAt only
     """
-    col = get_collection(Collection.USERS)
     now = datetime.now(timezone.utc)
-    doc = col.find_one_and_update(
-        {"telegramId": tg_user.id},
+
+    doc = await db[USERS].find_one_and_update(
+        {"telegramUserId": telegram_user.id},
         {
             "$set": {
-                "username": tg_user.username or "",
-                "firstName": tg_user.first_name or "",
-                "lastName": tg_user.last_name or "",
-                "updatedAt": now,
+                "username": telegram_user.username,
+                "firstName": telegram_user.first_name,
+                "lastName": telegram_user.last_name,
+                "lastSeenAt": now,
             },
             "$setOnInsert": {
-                "telegramId": tg_user.id,
-                "createdAt": now,
+                "telegramUserId": telegram_user.id,
+                "firstSeenAt": now,
+                "totalOrders": 0,
             },
         },
         upsert=True,
-        return_document=ReturnDocument.AFTER,
+        return_document=True,
     )
     return doc
-
-
-def get_user(telegram_id: int) -> Optional[dict]:
-    """Return a user by Telegram ID, or None."""
-    col = get_collection(Collection.USERS)
-    return col.find_one({"telegramId": telegram_id})

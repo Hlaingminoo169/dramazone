@@ -1,103 +1,87 @@
 """
 app/services/session_service.py
+─────────────────────────────────────────────────────────────────────────────
+MongoDB-backed session service.
 
-MongoDB-backed session management.
-
-Because FastAPI webhooks are stateless (requests may hit any instance),
-user session state MUST be stored in MongoDB — NOT in Python dicts.
-
-Sessions expire automatically after 24 hours via a MongoDB TTL index
-(see app/database/indexes.py).
+Provides get / update / clear operations on the sessions collection.
+TTL is reset on every update so active sessions stay alive.
+Expired sessions are auto-deleted by MongoDB TTL index.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import datetime, timedelta, timezone
+from typing import Optional
 
-from pymongo import ReturnDocument
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
-from app.database.mongodb import get_collection
-from app.types import BotType, Collection
+from app.config import get_settings
+from app.database.collections import SESSIONS
+from app.models.session import SessionState
 
 logger = logging.getLogger(__name__)
 
+# Default IDLE session returned when no document exists
+_DEFAULT_SESSION: dict = {
+    "state": SessionState.IDLE,
+    "packageSize": None,
+    "selectedMovieIds": [],
+    "pendingOrderCode": None,
+    "lastBotMessageId": None,
+}
 
-def get_session(telegram_id: int, bot_type: str) -> Optional[dict]:
-    """Return the current session document for a user, or None."""
-    col = get_collection(Collection.SESSIONS)
-    return col.find_one({"telegramId": telegram_id, "botType": bot_type})
 
-
-def set_session(
-    telegram_id: int,
-    bot_type: str,
-    state: str,
-    data: Optional[Dict[str, Any]] = None,
-) -> dict:
+async def get_session(db: AsyncIOMotorDatabase, user_id: int) -> dict:
     """
-    Upsert a session for the given user.
-
-    Always updates `updatedAt` so the TTL index resets the 24-hour clock.
+    Return the user's active session document.
+    If no session exists, returns a default IDLE dict (not saved to DB yet).
     """
-    col = get_collection(Collection.SESSIONS)
-    now = datetime.now(timezone.utc)
-    doc = col.find_one_and_update(
-        {"telegramId": telegram_id, "botType": bot_type},
-        {
-            "$set": {
-                "state": state,
-                "data": data or {},
-                "updatedAt": now,
-            },
-            "$setOnInsert": {
-                "telegramId": telegram_id,
-                "botType": bot_type,
-                "createdAt": now,
-            },
-        },
-        upsert=True,
-        return_document=ReturnDocument.AFTER,
-    )
+    doc = await db[SESSIONS].find_one({"telegramUserId": user_id})
+    if not doc:
+        return {**_DEFAULT_SESSION, "telegramUserId": user_id}
     return doc
 
 
-def update_session_data(
-    telegram_id: int,
-    bot_type: str,
-    data: Dict[str, Any],
-) -> Optional[dict]:
+async def update_session(
+    db: AsyncIOMotorDatabase,
+    user_id: int,
+    **fields,
+) -> None:
     """
-    Merge new key/value pairs into the session's `data` field
-    without changing the current state.
+    Upsert session fields for the given user.
+    Always resets the TTL expiry so active sessions don't expire mid-flow.
     """
-    col = get_collection(Collection.SESSIONS)
+    settings = get_settings()
     now = datetime.now(timezone.utc)
-    # Build a $set of "data.<key>" paths to merge without overwriting other keys.
-    set_fields: Dict[str, Any] = {"updatedAt": now}
-    for k, v in data.items():
-        set_fields[f"data.{k}"] = v
+    expires_at = now + timedelta(hours=settings.session_expiry_hours)
 
-    return col.find_one_and_update(
-        {"telegramId": telegram_id, "botType": bot_type},
-        {"$set": set_fields},
-        return_document=ReturnDocument.AFTER,
+    await db[SESSIONS].update_one(
+        {"telegramUserId": user_id},
+        {
+            "$set": {
+                **fields,
+                "telegramUserId": user_id,
+                "updatedAt": now,
+                "expiresAt": expires_at,
+            }
+        },
+        upsert=True,
     )
 
 
-def clear_session(telegram_id: int, bot_type: str) -> None:
-    """Delete the session document for the given user."""
-    col = get_collection(Collection.SESSIONS)
-    col.delete_one({"telegramId": telegram_id, "botType": bot_type})
+async def clear_session(db: AsyncIOMotorDatabase, user_id: int) -> None:
+    """Reset session to IDLE state, clearing all in-progress order data."""
+    await update_session(
+        db,
+        user_id,
+        state=SessionState.IDLE,
+        packageSize=None,
+        selectedMovieIds=[],
+        pendingOrderCode=None,
+    )
 
 
-def get_session_state(telegram_id: int, bot_type: str) -> Optional[str]:
-    """Shortcut — return just the state string."""
-    session = get_session(telegram_id, bot_type)
-    return session.get("state") if session else None
-
-
-def get_session_data(telegram_id: int, bot_type: str) -> Dict[str, Any]:
-    """Shortcut — return just the data dict (empty dict if no session)."""
-    session = get_session(telegram_id, bot_type)
-    return session.get("data", {}) if session else {}
+async def get_state(db: AsyncIOMotorDatabase, user_id: int) -> SessionState:
+    """Convenience: return just the current session state."""
+    session = await get_session(db, user_id)
+    return SessionState(session.get("state", SessionState.IDLE))
